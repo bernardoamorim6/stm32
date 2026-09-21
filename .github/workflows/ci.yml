@@ -48,8 +48,8 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install clang-tidy
-      run: sudo apt-get install -y clang-tidy
+    - name: Install clang-tidy and cppcheck
+      run: sudo apt-get install -y clang-tidy cppcheck
 
     - name: Configure
       run: cmake -S . -B build
