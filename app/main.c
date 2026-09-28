@@ -1,11 +1,16 @@
 #include "../drivers/include/bitops.h"
 
+int globalVariable1 = 0xDEADBEEF;
+int globalVariable2;
+
 int main(void) {
     uint32_t volatile *RCC_IOPENR = (uint32_t volatile *)(0x40021000+0x34);
     *RCC_IOPENR |= 1;
     uint32_t volatile *GPIOA_MODER = (uint32_t volatile *)(0x50000000 + 0x00);
     *GPIOA_MODER = insert(*GPIOA_MODER, 1, 10, 2);
 
+    globalVariable1++;
+    globalVariable2 = 5;
     uint32_t volatile *GPIOA_ODR = (uint32_t volatile *)(0x50000000 + 0x14);
     while (1) {
         int volatile counter = 0;
