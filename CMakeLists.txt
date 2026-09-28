@@ -14,9 +14,15 @@ add_library(bitops INTERFACE)
 target_include_directories(bitops INTERFACE drivers/include)
 
 if(CMAKE_CROSSCOMPILING)
-  # ARM build: firmware only
-  add_library(firmware STATIC app/main.c)
+  # ARM build: executable target
+  add_executable(firmware app/main.c drivers/src/startup.c)
+  
   target_link_libraries(firmware PRIVATE bitops)
+
+  target_link_options(firmware PRIVATE
+    -nostdlib
+    "-T${CMAKE_CURRENT_SOURCE_DIR}/linker/stm32c031c6.ld"
+  )
 else()
   # Host build: tests only
 
