@@ -42,6 +42,17 @@ jobs:
     - name: Build firmware
       run: cmake --build build-arm
 
+    - name: Size report
+      run: |
+        arm-none-eabi-size build-arm/firmware.elf
+        {
+          echo '### Firmware size'
+          echo '```'
+          arm-none-eabi-size build-arm/firmware.elf
+          echo '```'
+          echo '`text` + `data` occupies Flash (32 KB). `data` + `bss` occupies SRAM (12 KB).'
+        } >> "$GITHUB_STEP_SUMMARY"
+
   lint:
     runs-on: ubuntu-latest
     steps:
