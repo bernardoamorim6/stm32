@@ -20,7 +20,9 @@ This is a work in progress. What follows is what actually runs and is tested, no
 
 **Startup code** (`drivers/src/startup.c`) Full 48-entry vector table transcribed from RM0490's interrupt table, placed at `0x08000000`. Unused handlers resolve to a single `DefaultHandler` through `__attribute__((weak, alias(...)))`, so a real handler defined anywhere else silently overrides the default at link time. `Reset_Handler` copies `.data` from Flash to SRAM, zeroes `.bss`, and calls `main`.
 
-**Blinky** (`app/main.c`) Direct register writes: GPIOA clock enable in `RCC_IOPENR`, PA5 to output mode in `GPIOA_MODER`, toggle via `GPIOA_ODR`, busy-wait delay.
+**Blinky** (`app/main.c`) Direct register writes: GPIOA clock enable in `RCC_IOPENR`, PA5 to output mode in `GPIOA_MODER`, toggle via `GPIOA_ODR`.
+
+**SysTick and `delay_ms()`** (`drivers/src/systick.c`) Defined the four SysTick registers from PM0223 as a `volatile uint32_t` struct at `0xE000E010`. `systick_init()` writes the reload value, clears the current count, then enables the counter with its interrupt, in that order. `SysTick_Handler` increments a `static volatile` millisecond counter, and `delay_ms()` waits on the difference, using unsigned subtraction so it stays correct across a counter wrap. The handler needs no registration: defining it here overrides the weak alias in `startup.c` at link time, which `nm` confirms: `SysTick_Handler` moves off `DefaultHandler`'s address onto its own.
 
 **Clock tree** The reset clock path is documented end to end in
 [`NOTES.md`](NOTES.md): HSI48 (48 MHz) -> `HSIDIV` ÷4 -> HSISYS -> `SW` mux ->
@@ -33,20 +35,42 @@ The scope below is the plan, not a promise, it gets revised as I go, and this se
 **C layer (C17), remaining:**
 
 - GPIO input, pull-ups and alternate function (output works)
-- SysTick tick and `delay_ms()`
 - Interrupt-driven UART with TX/RX ring buffers
 - I²C master written from scratch, then a BME280 driver including the compensation maths
-- SSD1306 as a second address on the same bus — enough to prove addressing and capture two devices sharing a bus, no display driver
+- SSD1306 as a second address on the same bus. Enough to prove addressing and capture two devices sharing a bus, no display driver
 
-**A convention not yet met.** Peripheral access is currently inline `volatile uint32_t *` pointers in `main.c`. The intended design is structs of `volatile uint32_t` at fixed base addresses, with every driver taking a pointer to its peripheral's register struct — firmware passes the hardware address, tests pass a struct in RAM. That indirection is the whole host-testing strategy for the C layer, and it lands with the first real driver.
+**A convention not yet met.** Peripheral access is currently inline `volatile uint32_t *` pointers in `main.c`. The intended design is structs of `volatile uint32_t` at fixed base addresses, with every driver taking a pointer to its peripheral's register struct. Firmware passes the hardware address, tests pass a struct in RAM. That indirection is the whole host-testing strategy for the C layer, and it lands with the first real driver.
 
 **C++17 layer** (`hal/`, empty until the C drivers exist). It exists to answer one question: can modern C++ make register access safer than the C layer at zero cost? Type-safe registers via templates where an illegal write fails at compile time, RAII for I²C transactions so a stop can never be missed on an early return, `-fno-exceptions -fno-rtti`, `std::span` over the C layer's buffers, `enum class` for modes and errors.
 
-**The measurement.** The same I²C register read performed two ways — through the C driver directly, and through the C++ wrapper — comparing `.text` size and cycle counts against a stripped baseline. Table to follow here.
+**The measurement.** The same I²C register read performed two ways, through the C driver directly and through the C++ wrapper, comparing `.text` size and cycle counts against a stripped baseline. Table to follow here.
 
 **Deferred until after the October gate:** timer/PWM output and ADC (internal temperature sensor and VREFINT).
 
-**Not attempted:** input capture / encoder mode (no encoder in the kit) and DMA — a genuine gap, and the highest-value addition if time appears later.
+**Not attempted:** input capture / encoder mode (no encoder in the kit) and DMA, which is a genuine gap and the highest-value addition if time appears later.
+
+---
+
+## Measured: the 1 Hz blink
+
+SysTick is configured for a 1 ms tick from a 12 MHz HCLK, a reload of 11999, since the counter runs down *through* zero and so takes `RVR + 1` cycles per period. The LED toggles every 500 ms, giving one full cycle per second.
+
+![pulseview_session](image.png)
+
+Verified on PA5 (Arduino D13 header) with two independent instruments:
+
+| Target | Logic analyser | Multimeter | Deviation |
+|---|---|---|---|
+| 100 Hz (`delay_ms(5)`) | 100.5 Hz | 100.5 Hz | +0.5% |
+| 1 Hz (`delay_ms(500)`) | ~1.005 Hz | ~1.005 Hz | +0.5% |
+
+Both instruments agree at both frequencies, which rules out measurement error. The interesting part is that the deviation is **the same 0.5% at both frequencies**, and that is what identifies the cause.
+
+A mistake in the firmware would be quantised: an off-by-one in the reload value is 1/12000 = 0.008%, a miscounted tick is 1/5 = 20%. No integer error in this code produces 0.5%. That would be 60 cycles out of 12000, and there is no 60 anywhere in it. Fixed per-call overhead is ruled out too, because overhead would be proportionally large at `delay_ms(5)` and negligible at `delay_ms(500)`; the error would shrink between the two rows above, and it doesn't.
+
+A time base running 0.5% fast explains it exactly, and scales everything uniformly. HSI48 is an RC oscillator factory-trimmed, but temperature- and voltage-dependent, so 48.24 MHz instead of 48.00 gives a 12.06 MHz HCLK, a 0.995 ms tick, and a 9.95 ms period where 10 ms was intended.
+
+Worth noting what *cannot* drift here: interrupt latency. SysTick reloads in hardware the instant the counter reaches zero, independent of when the CPU services the handler. Late interrupts cause jitter, never accumulating error.
 
 ---
 
@@ -55,10 +79,10 @@ The scope below is the plan, not a promise, it gets revised as I go, and this se
 | | |
 |---|---|
 | Board | NUCLEO-C031C6 (on-board ST-LINK/V2.1) |
-| MCU | STM32C031C6 — Cortex-M0+, 32 KB Flash, 12 KB SRAM |
+| MCU | STM32C031C6, Cortex-M0+, 32 KB Flash, 12 KB SRAM |
 | Toolchain | Arm GNU Toolchain **15.3.Rel1** (`arm-none-eabi-gcc`) |
 | Host tests | GoogleTest, fetched by CMake at configure time |
-| Flash / debug | STM32CubeCLT — `STM32_Programmer_CLI`, `ST-LINK_gdbserver` |
+| Flash / debug | STM32CubeCLT: `STM32_Programmer_CLI`, `ST-LINK_gdbserver` |
 
 The toolchain version is pinned to `15.3.Rel1` in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) so CI builds with the same compiler as the development machine.
 
@@ -66,7 +90,7 @@ Current firmware size:
 
 ```
    text    data     bss     dec     hex
-    664       4       4     672     2a0
+    756       4       8     768     300
 ```
 
 ---
@@ -156,8 +180,8 @@ through logs. Flash usage is `text + data`; SRAM usage is `data + bss`.
 
 [`NOTES.md`](NOTES.md) is a running log of the mistakes I made building this and what fixed each one: kept because most of them are easy to repeat. A sample:
 
-- **The SVD disagrees with the reference manual.** ST's own `STM32C031.svd` gives `RCC_CR` a reset value of `0x00000500`, putting `HSIDIV` at ÷1 and implying a 48 MHz boot clock. RM0490 says ÷4, and its revision history records the correction. I read the register off the chip and got `0x00001540` — the manual is right, the SVD is wrong on two fields, and the silicon settles it.
+- **The SVD disagrees with the reference manual.** ST's own `STM32C031.svd` gives `RCC_CR` a reset value of `0x00000500`, putting `HSIDIV` at ÷1 and implying a 48 MHz boot clock. RM0490 says ÷4, and its revision history records the correction. I read the register off the chip and got `0x00001540`. The manual is right, the SVD is wrong on two fields, and the silicon settles it.
 - **A vector table entry is one greater than the function it points to.** `Reset_Handler` is at `0x08000218`; the table holds `0x08000219`. That's the Thumb bit, and a cleared bit 0 means an immediate HardFault.
-- **A blinking LED hid a wrong register read.** My first read-modify-write on `ODR` read `MODER` instead. The LED blinked correctly anyway, because bit 5 was still being set and cleared as intended — so the symptom I was watching for was present while the code was wrong.
+- **A blinking LED hid a wrong register read.** My first read-modify-write on `ODR` read `MODER` instead. The LED blinked correctly anyway, because bit 5 was still being set and cleared as intended, so the symptom I was watching for was present while the code was wrong.
 
 `NOTES.md` also holds the full clock-path derivation and a written answer to "what happens between reset and `main()`".

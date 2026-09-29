@@ -174,6 +174,65 @@ The principle is that I must always have *at least* enough wait states for the c
 
 ---
 
+# SysTick, and what the instruments said
+
+## Configuring it
+
+SysTick is a Cortex-M core peripheral, so it is documented in **PM0223**, not RM0490 since ARM designed it, not ST. Two consequences that cost me time before I understood them:
+
+- It does **not** appear in the peripheral viewer. `svd/STM32C031.svd` describes ST peripherals only, which is the same reason `SCB`/`VTOR` are missing from it. I read it with `x/4xw 0xE000E010` in the debug console instead.
+- It lives in the System Control Space at `0xE000E010`, nowhere near the `0x4002xxxx` / `0x5000xxxx` ranges everything else has been in.
+
+Four registers, laid out consecutively, so a struct of four `volatile uint32_t` *is* the hardware layout:
+
+| Offset | Register | |
+|---|---|---|
+| `0x00` | `CSR` | control and status |
+| `0x04` | `RVR` | reload value |
+| `0x08` | `CVR` | current value |
+| `0x0C` | `CALIB` | calibration |
+
+`CSR` bits: `ENABLE` (0), `TICKINT` (1), `CLKSOURCE` (2), `COUNTFLAG` (16). I set the low three, so: counter running, interrupt on reaching zero, clocked from HCLK. `CLKSOURCE = 0` would instead select HCLK/8, that "to Cortex system timer" branch off Figure 9, and would make the reload arithmetic wrong by 8×.
+
+**Reload value: `HCLK/1000 - 1`, so 11999 at 12 MHz.** The `-1` is not about call overhead. The counter counts down *through* zero: loaded with N it visits N, N-1, … 1, 0, which is N+1 counts. The period is `RVR + 1` cycles, so `RVR = cycles - 1`. It is inclusive-endpoint arithmetic, entirely deterministic.
+
+**Write order matters:** `RVR`, then `CVR`, then `CSR`. Writing *any* value to `CVR` clears both the current count and `COUNTFLAG`. Skip it and the counter starts from whatever was already in the register, making the first tick the wrong length. Enable last, once the period and starting count are right.
+
+24-bit counter, so the maximum reload is `0xFFFFFF` = 16,777,215. 11999 leaves enormous headroom, but at 100 MHz a 1 ms tick would be 99,999 and a 1 *second* tick would not fit at all.
+
+## The handler needs no registration
+
+Defining `SysTick_Handler` in `systick.c` overrides the weak alias in `startup.c` at link time. No table edit, no registration call. `nm` shows it:
+
+```
+08000280 T DefaultHandler
+080002b0 T SysTick_Handler
+```
+
+Before, `SysTick_Handler` was `W` and shared `DefaultHandler`'s address. And the vector table's slot 15 (offset `0x3C`) holds `0x080002b1`, which is the handler's address with the Thumb bit set.
+
+## What the instruments said
+
+Measured on PA5 at the Arduino D13 header, logic analyser and multimeter independently:
+
+| Target | Logic analyser | Multimeter | Deviation |
+|---|---|---|---|
+| 100 Hz (`delay_ms(5)`) | 100.5 Hz | 100.5 Hz | +0.5% |
+| 1 Hz (`delay_ms(500)`) | ~1.005 Hz | ~1.005 Hz | +0.5% |
+
+The DMM struggles at 1 Hz, because most meters need a gate window longer than a full cycle, so readings there are slow and jumpy. Measuring at 100 Hz first got around that: both frequencies come from the same 1 ms tick, so if the tick is right at 100 Hz it is right at 1 Hz.
+
+**Same 0.5% at both frequencies is what identifies the cause.** A firmware
+error would be quantised: an off-by-one in the reload is 0.008%, a miscounted tick is 20%. Nothing in this code produces 0.5%; that is 60 cycles out of 12000 and there is no 60 in it. Fixed per-call overhead is ruled out too, because it would be proportionally large at `delay_ms(5)` and negligible at `delay_ms(500)`. The error would shrink between the rows, and it does not.
+
+A time base 0.5% fast explains it and scales everything uniformly. HSI48 is an RC oscillator: 48.24 MHz instead of 48.00 gives 12.06 MHz HCLK, a 0.995 ms tick, a 9.95 ms period.
+
+What cannot drift: interrupt latency. SysTick reloads in hardware the moment the counter hits zero, regardless of when the CPU runs the handler. Late interrupts cause jitter, never accumulating error.
+
+TODO: check DS13867 for the HSI48 accuracy figure and confirm 0.5% is inside the spec rather than merely plausible.
+
+---
+
 # Mistakes and fixes
 
 ## ARM build: executable vs static library
@@ -213,6 +272,14 @@ Bits 6, 8, 10 and 12 are set, which decodes as:
 Every field matches RM0490, including *both* fields the revision history names. So the SVD is wrong on two counts, not one.
 
 Takeaway: the SVD stays useful for register layout: addresses, offsets, bit positions, which is what the peripheral viewer needs; but it is a generated artifact. Where it disagrees with the reference manual, the manual wins; and where it matters, I read the register off the chip and settle it.
+
+## A frozen program looks exactly like a dead pin
+
+After writing `systick.c` the LED stopped blinking, and the logic analyser showed the pin permanently high. I went looking at the analyser settings and the wiring. The actual cause was that I never called `systick_init()` from `main`. SysTick was still at its reset state, so the handler never fired, `counter` never incremented, and `delay_ms()` spun forever on its first call. The LED had been switched on by the line before it and stayed there.
+
+Lesson: a pin stuck at a constant level is a *software* symptom at least as often as a hardware one. Before re-probing, check whether the program is still running at all. A breakpoint in the ISR answers it in seconds.
+
+Related: after fixing it, the LED still did not blink, because I had edited the source but not rebuilt and reflashed. Editing a file pushes nothing to the chip.
 
 ## A blinking LED hid a wrong register read
 

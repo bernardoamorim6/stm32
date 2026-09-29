@@ -15,7 +15,12 @@ target_include_directories(bitops INTERFACE drivers/include)
 
 if(CMAKE_CROSSCOMPILING)
   # ARM build: executable target
-  add_executable(firmware app/main.c drivers/src/startup.c)
+  add_executable(
+    firmware 
+    app/main.c 
+    drivers/src/startup.c
+    drivers/src/systick.c
+    )
   set_target_properties(firmware PROPERTIES SUFFIX ".elf")
 
   target_link_libraries(firmware PRIVATE bitops)
