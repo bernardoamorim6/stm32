@@ -229,7 +229,24 @@ A time base 0.5% fast explains it and scales everything uniformly. HSI48 is an R
 
 What cannot drift: interrupt latency. SysTick reloads in hardware the moment the counter hits zero, regardless of when the CPU runs the handler. Late interrupts cause jitter, never accumulating error.
 
-TODO: check DS13867 for the HSI48 accuracy figure and confirm 0.5% is inside the spec rather than merely plausible.
+## Is 0.5% actually within spec?
+
+Yes. RM0490's HSI48 section states that each device is factory calibrated to **1 % accuracy at TA=25°C**, with the calibration value loaded into `HSICAL[7:0]` at reset. My +0.5% is half that budget on a room-temperature bench, so the measurement is unremarkable rather than suspicious.
+
+Two qualifications. That 1 % is the accuracy of the factory trim at 25°C specifically, and the same section says voltage and temperature variations may shift the frequency, so it is a best case rather than a guarantee. And it is the reference manual's figure, not the datasheet's: DS13867 carries the full accuracy table across the operating temperature range, which will be wider.
+
+## The error is correctable in software
+
+`RCC_ICSCR`, at offset `0x04` from the RCC base, so `0x40021004`:
+
+| Field | Bits | Purpose |
+|---|---|---|
+| `HSICAL` | 7:0 | factory calibration value, loaded automatically at reset |
+| `HSITRIM` | 14:8 | software trim, added on top of the factory value |
+
+So the +0.5% is not something I simply have to accept. Reading `HSICAL` shows this particular chip's factory trim, and adjusting `HSITRIM` shifts the oscillator. RM0490 §6.2.14 also describes measuring HSI48 against a reference using TIM14/TIM16/TIM17, which is the chip's own built-in version of what I did externally with a logic analyser.
+
+Next step before the following day's work: read `HSICAL`, try trimming toward zero error, and re-measure with both instruments to confirm.
 
 ---
 

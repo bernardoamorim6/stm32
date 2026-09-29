@@ -55,7 +55,7 @@ The scope below is the plan, not a promise, it gets revised as I go, and this se
 
 SysTick is configured for a 1 ms tick from a 12 MHz HCLK, a reload of 11999, since the counter runs down *through* zero and so takes `RVR + 1` cycles per period. The LED toggles every 500 ms, giving one full cycle per second.
 
-![pulseview_session](image.png)
+![pulseview_session](images/1hz-blink-pulseview.png)
 
 Verified on PA5 (Arduino D13 header) with two independent instruments:
 
@@ -69,6 +69,8 @@ Both instruments agree at both frequencies, which rules out measurement error. T
 A mistake in the firmware would be quantised: an off-by-one in the reload value is 1/12000 = 0.008%, a miscounted tick is 1/5 = 20%. No integer error in this code produces 0.5%. That would be 60 cycles out of 12000, and there is no 60 anywhere in it. Fixed per-call overhead is ruled out too, because overhead would be proportionally large at `delay_ms(5)` and negligible at `delay_ms(500)`; the error would shrink between the two rows above, and it doesn't.
 
 A time base running 0.5% fast explains it exactly, and scales everything uniformly. HSI48 is an RC oscillator factory-trimmed, but temperature- and voltage-dependent, so 48.24 MHz instead of 48.00 gives a 12.06 MHz HCLK, a 0.995 ms tick, and a 9.95 ms period where 10 ms was intended.
+
+RM0490 states that each device is factory calibrated to **1 % accuracy at TA=25°C**, so +0.5% on a room-temperature bench is half that and well inside spec. It is also correctable: `RCC_ICSCR` at `0x40021004` holds the factory value in `HSICAL[7:0]` and a software trim in `HSITRIM[14:8]`.
 
 Worth noting what *cannot* drift here: interrupt latency. SysTick reloads in hardware the instant the counter reaches zero, independent of when the CPU services the handler. Late interrupts cause jitter, never accumulating error.
 
