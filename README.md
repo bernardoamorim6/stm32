@@ -20,12 +20,33 @@ This is a work in progress. What follows is what actually runs and is tested, no
 
 **Startup code** (`drivers/src/startup.c`) Full 48-entry vector table transcribed from RM0490's interrupt table, placed at `0x08000000`. Unused handlers resolve to a single `DefaultHandler` through `__attribute__((weak, alias(...)))`, so a real handler defined anywhere else silently overrides the default at link time. `Reset_Handler` copies `.data` from Flash to SRAM, zeroes `.bss`, and calls `main`.
 
-**Blinky** (`app/main.c`) Direct register writes: GPIOA clock enable in `RCC_IOPENR`, PA5 to output mode in  GPIOA_MODER`, toggle via `GPIOA_ODR`, busy-wait delay.
+**Blinky** (`app/main.c`) Direct register writes: GPIOA clock enable in `RCC_IOPENR`, PA5 to output mode in `GPIOA_MODER`, toggle via `GPIOA_ODR`, busy-wait delay.
 
 **Clock tree** The reset clock path is documented end to end in
 [`NOTES.md`](NOTES.md): HSI48 (48 MHz) -> `HSIDIV` ÷4 -> HSISYS -> `SW` mux ->
-`SYSDIV` ÷1 -> SYSCLK -> `HPRE` ÷1 -> HCLK = **12MHz** at the core, with the controlling register field and bit range for each stage. Verified by reading `RCC_CR` off the chip at the reset halt, and by deliberately changing `HSIDIV` to ÷8 and observing the blink rate halve.
+`SYSDIV` ÷1 -> SYSCLK -> `HPRE` ÷1 -> HCLK = **12 MHz** at the core, with the controlling register field and bit range for each stage. Verified by reading `RCC_CR` off the chip at the reset halt, and by deliberately changing `HSIDIV` to ÷8 and observing the blink rate halve.
 
+### Not yet implemented
+
+The scope below is the plan, not a promise, it gets revised as I go, and this section is updated alongside each commit.
+
+**C layer (C17), remaining:**
+
+- GPIO input, pull-ups and alternate function (output works)
+- SysTick tick and `delay_ms()`
+- Interrupt-driven UART with TX/RX ring buffers
+- I²C master written from scratch, then a BME280 driver including the compensation maths
+- SSD1306 as a second address on the same bus — enough to prove addressing and capture two devices sharing a bus, no display driver
+
+**A convention not yet met.** Peripheral access is currently inline `volatile uint32_t *` pointers in `main.c`. The intended design is structs of `volatile uint32_t` at fixed base addresses, with every driver taking a pointer to its peripheral's register struct — firmware passes the hardware address, tests pass a struct in RAM. That indirection is the whole host-testing strategy for the C layer, and it lands with the first real driver.
+
+**C++17 layer** (`hal/`, empty until the C drivers exist). It exists to answer one question: can modern C++ make register access safer than the C layer at zero cost? Type-safe registers via templates where an illegal write fails at compile time, RAII for I²C transactions so a stop can never be missed on an early return, `-fno-exceptions -fno-rtti`, `std::span` over the C layer's buffers, `enum class` for modes and errors.
+
+**The measurement.** The same I²C register read performed two ways — through the C driver directly, and through the C++ wrapper — comparing `.text` size and cycle counts against a stripped baseline. Table to follow here.
+
+**Deferred until after the October gate:** timer/PWM output and ADC (internal temperature sensor and VREFINT).
+
+**Not attempted:** input capture / encoder mode (no encoder in the kit) and DMA — a genuine gap, and the highest-value addition if time appears later.
 
 ---
 
@@ -138,6 +159,5 @@ through logs. Flash usage is `text + data`; SRAM usage is `data + bss`.
 - **The SVD disagrees with the reference manual.** ST's own `STM32C031.svd` gives `RCC_CR` a reset value of `0x00000500`, putting `HSIDIV` at ÷1 and implying a 48 MHz boot clock. RM0490 says ÷4, and its revision history records the correction. I read the register off the chip and got `0x00001540` — the manual is right, the SVD is wrong on two fields, and the silicon settles it.
 - **A vector table entry is one greater than the function it points to.** `Reset_Handler` is at `0x08000218`; the table holds `0x08000219`. That's the Thumb bit, and a cleared bit 0 means an immediate HardFault.
 - **A blinking LED hid a wrong register read.** My first read-modify-write on `ODR` read `MODER` instead. The LED blinked correctly anyway, because bit 5 was still being set and cleared as intended — so the symptom I was watching for was present while the code was wrong.
-- **A tool installed locally proves nothing about CI.** `cppcheck` passed on my machine and failed on the runner with exit code 127, because only `clang-tidy` had an explicit install step.
 
 `NOTES.md` also holds the full clock-path derivation and a written answer to "what happens between reset and `main()`".
