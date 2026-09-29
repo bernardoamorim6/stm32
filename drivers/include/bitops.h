@@ -4,6 +4,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // Creates a mask of 'width' ones starting at 'position'
 static inline uint32_t make_mask(uint32_t position, uint32_t width) {
     if (width == 0) return 0;
@@ -53,4 +57,8 @@ static inline uint32_t insert(uint32_t reg, uint32_t value, uint32_t position, u
     return cleared_reg | shifted_value;
 }
 
+#ifdef __cplusplus
+}  // extern "C"
 #endif
+
+#endif  // BITOPS_H
