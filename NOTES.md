@@ -239,14 +239,43 @@ Two qualifications. That 1 % is the accuracy of the factory trim at 25°C specif
 
 `RCC_ICSCR`, at offset `0x04` from the RCC base, so `0x40021004`:
 
-| Field | Bits | Purpose |
+| Field | Bits | Access | Purpose |
+|---|---|---|---|
+| `HSICAL` | 7:0 | read-only | the live calibration value: an invisible factory number plus `HSITRIM` |
+| `HSITRIM` | 14:8 | read/write | the only part I can change |
+
+`HSICAL` is not a value I load or write. RM0490 says it is "a sum of an internal factory-programmed number and the value of the `HSITRIM[6:0]` bitfield", so the factory contribution is never directly visible. `HSITRIM` is the whole interface. It resets to `0x40`, which I confirmed by reading the register on the chip rather than trusting the SVD.
+
+RM0490 §6.2.14 also describes measuring HSI48 against a reference using TIM14/TIM16/TIM17, which is the chip's built-in version of what I did externally with a logic analyser.
+
+## Trimming it out
+
+Datasheet Table 41 gives the trimming step as 0.3% typical per code, with a 0.2 to 0.4% range, and flags three discontinuities: 127 to 128 is -6% typical, 63 to 64 and 191 to 192 are -3.8%. Every figure in that table is characterisation data, not production tested, so I stepped the trim and measured rather than calculating a target.
+
+At 100 Hz, where the multimeter is comfortable:
+
+| `HSITRIM` | Measured | Error |
 |---|---|---|
-| `HSICAL` | 7:0 | factory calibration value, loaded automatically at reset |
-| `HSITRIM` | 14:8 | software trim, added on top of the factory value |
+| 64 (reset) | 100.5 Hz | +0.5% |
+| 65 | 100.8 Hz | +0.8% |
+| 63 | 100.2 Hz | +0.3% |
+| **62** | **99.94 Hz** | **-0.06%** |
 
-So the +0.5% is not something I simply have to accept. Reading `HSICAL` shows this particular chip's factory trim, and adjusting `HSITRIM` shifts the oscillator. RM0490 §6.2.14 also describes measuring HSI48 against a reference using TIM14/TIM16/TIM17, which is the chip's own built-in version of what I did externally with a logic analyser.
+Code 65 confirmed direction and step in one reading: +1 code gave +0.3%, so lower codes were the way down. Two codes below reset moved the frequency 0.557%, about 0.28% per code, matching the datasheet typical closely.
 
-Next step before the following day's work: read `HSICAL`, try trimming toward zero error, and re-measure with both instruments to confirm.
+**Stopping at 62 is forced by granularity, not by giving up.** With a 0.28% step, code 63 lands near +0.22% and 62 at -0.06%, and there is nothing between them. The best achievable is roughly half a step from zero, and -0.06% is essentially that. The residual is now smaller than the reading spread on either instrument.
+
+### The discontinuity did not appear, and I had expected it to
+
+I predicted 64 to 63 would jump about +3.8% because the datasheet lists that transition as a discontinuity. It did not. The reason is in the RM's wording: the discontinuities occur at multiples of 64 in **`HSICAL`**, and `HSICAL` is the factory number *plus* `HSITRIM`. The boundaries therefore sit wherever that sum crosses 64, 128 or 192, which depends on a factory value I cannot read. On this chip the response is linear across at least 62 to 65.
+
+That is another argument for measuring instead of computing: the position of the non-linear regions is not knowable in advance from the documentation.
+
+### What this does and does not fix
+
+It cancels *this die's* manufacturing offset at bench temperature. Table 41's `Δ_Temp(HSI)` row still allows ±1% over 0 to 85°C and -2.5/+2% over the full range, and none of that drift is addressed. The honest description is "calibrated at room temperature", not "accurate".
+
+The value 62 is also specific to this chip. Another STM32C031 has a different factory offset and would need a different code, so it belongs in the source as a measured constant with a comment, not as a magic number that looks universal.
 
 ---
 

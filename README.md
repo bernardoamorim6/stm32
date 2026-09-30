@@ -74,6 +74,23 @@ RM0490 states that each device is factory calibrated to **1 % accuracy at TA=25Â
 
 Worth noting what *cannot* drift here: interrupt latency. SysTick reloads in hardware the instant the counter reaches zero, independent of when the CPU services the handler. Late interrupts cause jitter, never accumulating error.
 
+### Trimming it out
+
+Datasheet Table 41 gives the user trimming step as 0.3% typical per code, so I stepped `HSITRIM` and re-measured at 100 Hz, inside my multimeter's working range:
+
+| `HSITRIM` | Measured | Error |
+|---|---|---|
+| 64 (reset) | 100.5 Hz | +0.5% |
+| 65 | 100.8 Hz | +0.8% |
+| 63 | 100.2 Hz | +0.3% |
+| **62** | **99.94 Hz** | **-0.06%** |
+
+Two codes moved the frequency 0.557%, so about 0.28% per code, matching the datasheet's 0.3% typical. That also fixes the limit: with a 0.28% step, code 63 would sit near +0.22% and code 62 at -0.06%, with nothing in between. **-0.06% is the granularity floor, not a stopping point chosen out of laziness.** The residual error is now smaller than the spread between successive readings on either instrument.
+
+Two honest caveats:
+- This cancels *this die's* manufacturing offset at bench temperature; 
+- 62 is specific to this chip, so it is a measured constant that might not be the same on other boards.
+
 ---
 
 ## Hardware and toolchain
