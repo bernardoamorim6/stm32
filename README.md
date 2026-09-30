@@ -14,7 +14,7 @@ This is a work in progress. What follows is what actually runs and is tested, no
 
 ### Implemented
 
-**Bit manipulation library** (`drivers/include/bitops.h`) Header-only C, six `static inline` functions for register field access: `make_mask`, `insert`, `extract`, `set_bits`, `clear_bits`, `test_bits`. Covered by 25 host-side GoogleTest cases including the boundary conditions that actually bite: zero width, full 32-bit width, top-bit fields, and overwriting an existing field value (the case that catches a forgotten clear-before-OR).
+**Bit manipulation library** (`drivers/include/bitops.h`) Header-only C, six `static inline` functions for register field access: `make_mask`, `insert`, `extract`, `set_bits`, `clear_bits`, `test_bits`. Covered by host-side GoogleTest cases including the boundary conditions that actually bite: zero width, full 32-bit width, top-bit fields, and overwriting an existing field value (the case that catches a forgotten clear-before-OR).
 
 **Linker script** (`linker/stm32c031c6.ld`) Memory regions taken from the datasheet: Flash at `0x08000000` (32 KB), SRAM at `0x20000000` (12 KB). Defines `.isr_vector`, `.text`, `.data` and `.bss`, the load-address/runtime-address split for `.data`, and `top_of_stack` derived from `ORIGIN(SRAM) + LENGTH(SRAM)`.
 
@@ -23,6 +23,10 @@ This is a work in progress. What follows is what actually runs and is tested, no
 **Blinky** (`app/main.c`) Direct register writes: GPIOA clock enable in `RCC_IOPENR`, PA5 to output mode in `GPIOA_MODER`, toggle via `GPIOA_ODR`.
 
 **SysTick and `delay_ms()`** (`drivers/src/systick.c`) Defined the four SysTick registers from PM0223 as a `volatile uint32_t` struct at `0xE000E010`. `systick_init()` writes the reload value, clears the current count, then enables the counter with its interrupt, in that order. `SysTick_Handler` increments a `static volatile` millisecond counter, and `delay_ms()` waits on the difference, using unsigned subtraction so it stays correct across a counter wrap. The handler needs no registration: defining it here overrides the weak alias in `startup.c` at link time, which `nm` confirms: `SysTick_Handler` moves off `DefaultHandler`'s address onto its own.
+
+**Register definitions** (`drivers/include/stm32c031_regs.h`) A `GPIO_Regs` struct of `volatile uint32_t` members in RM0490's register order, written by hand from the manual rather than taken from a vendor header. The struct layout *is* the memory map, so eleven `static_assert`s on `offsetof` pin every member to its documented offset and the total size to `0x2C`. A member added, reordered or mis-padded becomes a build failure naming that member, instead of silently redirecting every access after it.
+
+**GPIO driver** (`drivers/src/gpio.c`) `gpio_set_mode`, `set_pull`, `set_otype`, `set_ospeed`, `set_af`, `gpio_write` and `gpio_read`, each taking a `GPIO_Regs *` rather than hard-coding a base address. Field writes go through `bitops.h`. `gpio_write` uses `BSRR` rather than a read-modify-write on `ODR`: bits 15:0 set, bits 31:16 clear, zeros do nothing, so a single store cannot race an interrupt touching the same port.
 
 **Clock tree** The reset clock path is documented end to end in
 [`NOTES.md`](NOTES.md): HSI48 (48 MHz) -> `HSIDIV` ÷4 -> HSISYS -> `SW` mux ->
@@ -34,12 +38,11 @@ The scope below is the plan, not a promise, it gets revised as I go, and this se
 
 **C layer (C17), remaining:**
 
-- GPIO input, pull-ups and alternate function (output works)
 - Interrupt-driven UART with TX/RX ring buffers
 - I²C master written from scratch, then a BME280 driver including the compensation maths
 - SSD1306 as a second address on the same bus. Enough to prove addressing and capture two devices sharing a bus, no display driver
 
-**A convention not yet met.** Peripheral access is currently inline `volatile uint32_t *` pointers in `main.c`. The intended design is structs of `volatile uint32_t` at fixed base addresses, with every driver taking a pointer to its peripheral's register struct. Firmware passes the hardware address, tests pass a struct in RAM. That indirection is the whole host-testing strategy for the C layer, and it lands with the first real driver.
+**Partially converted to the register-struct convention.** GPIO now follows it: `stm32c031_regs.h` defines the port as a struct, and every driver function takes a pointer to one. Firmware passes the hardware address, tests pass a struct in RAM. RCC and SysTick still poke fixed addresses directly and will be converted as those drivers are written.
 
 **C++17 layer** (`hal/`, empty until the C drivers exist). It exists to answer one question: can modern C++ make register access safer than the C layer at zero cost? Type-safe registers via templates where an illegal write fails at compile time, RAII for I²C transactions so a stop can never be missed on an early return, `-fno-exceptions -fno-rtti`, `std::span` over the C layer's buffers, `enum class` for modes and errors.
 
@@ -109,7 +112,7 @@ Current firmware size:
 
 ```
    text    data     bss     dec     hex
-    756       4       8     768     300
+   1348       0       4    1352     548
 ```
 
 ---
@@ -156,11 +159,14 @@ What this should show, and why it matters:
 
 ```
 0 .isr_vector   000000c0  08000000  08000000
-1 .text         000000b4  080000c0  080000c0
-2 .data         00000004  20000000  0800027c
+1 .text         00000484  080000c0  080000c0
+2 .data         00000000  20000000  08000544
+3 .bss          00000004  20000000  08000544
 ```
 
-`.isr_vector` sits at `0x08000000`: the vector table has to be the first thing in Flash or the core can't find the initial stack pointer and reset vector on boot. `.data` has a different VMA (`0x20000000`, SRAM) and LMA (Flash): it runs from RAM but is stored in Flash, and closing that gap is exactly what the copy loop in `Reset_Handler` does.
+`.isr_vector` sits at `0x08000000`: the vector table has to be the first thing in Flash or the core can't find the initial stack pointer and reset vector on boot.
+
+`.data` and `.bss` share a VMA of `0x20000000` but `.data`'s LMA is in Flash, because initialized globals are stored in the image and copied to SRAM at startup, which is exactly what the copy loop in `Reset_Handler` does. `.data` is currently empty and `.bss` holds only the SysTick tick counter, since the firmware has no initialized globals at the moment. Adding `uint32_t x = 0xDEADBEEF;` to `main.c` makes `.data` grow by four bytes and its LMA and VMA visibly diverge, which is the quickest way to watch the copy loop do something in the debugger.
 
 ---
 
@@ -179,6 +185,24 @@ svd/                 CMSIS-SVD register descriptions (for the debugger)
 ```
 
 ---
+
+## Testing a driver without hardware
+
+45 GoogleTest cases run on the host, with no board attached. That is possible because no driver function knows its own address:
+
+```c
+void gpio_set_mode(GPIO_Regs *port, uint32_t pin, gpio_mode_t mode);
+```
+
+Firmware passes `GPIOA`, which is a macro for the real base address. A test passes the address of an ordinary zeroed struct in RAM, calls the driver, and inspects what changed. The driver cannot tell the difference.
+
+Each test asserts two things: the intended field took the intended value, and neighbouring fields did not move. The second half is the one that earns its keep, since most register bugs are collateral damage rather than a wrong value in the right place. Specific cases worth calling out:
+
+- `gpio_set_af` on pin 7 and pin 8, which sit either side of the `AFR[pin / 8]` boundary between the low and high registers
+- `gpio_write` set and clear, checking `BSRR`'s two halves are not swapped
+- writing `11` then `01` to the same `MODER` field, which fails if the old value is OR'd rather than cleared first
+
+The suite has been checked against deliberately broken code, not just working code: swapping `BSRR`'s set and clear branches fails exactly those two tests and nothing else.
 
 ## CI
 

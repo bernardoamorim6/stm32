@@ -20,7 +20,8 @@ if(CMAKE_CROSSCOMPILING)
     app/main.c 
     drivers/src/startup.c
     drivers/src/systick.c
-    )
+    drivers/src/gpio.c
+  )
   set_target_properties(firmware PROPERTIES SUFFIX ".elf")
 
   target_link_libraries(firmware PRIVATE bitops)
@@ -49,10 +50,23 @@ else()
   )
   target_link_libraries(
     bitops_tests
+    bitops
+    GTest::gtest_main
+  )
+
+  add_executable(
+    gpio_tests
+    tests/gpio_tests.cpp
+    drivers/src/gpio.c
+  )
+  target_link_libraries(
+    gpio_tests
+    bitops
     GTest::gtest_main
   )
 
   include(GoogleTest)
   gtest_discover_tests(bitops_tests)
+  gtest_discover_tests(gpio_tests)
 
 endif()

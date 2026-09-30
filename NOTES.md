@@ -279,6 +279,51 @@ The value 62 is also specific to this chip. Another STM32C031 has a different fa
 
 ---
 
+# Writing register definitions by hand
+
+## The struct is the memory map
+
+A peripheral struct it is the mapping of the hardware. The compiler lays members out consecutively, and overlaying that on a base address encompasses whole mechanism. So member order and size are load-bearing in a way ordinary structs are not: insert one member and every register after it
+silently points somewhere else.
+Creating a struct for the registers creates a map of the hardware. Since the compiler lays members out consecutively, overlaying them on a bae address encompasses the whole mechanism. This makes size and order load bearing in a way that regular C structs are not, inserting the members in a ceritain order is imperative to make sure they point to the right place.
+
+GPIO is contiguous from `0x00` to `0x28` with no reserved holes, so I didn't need to add any padding members. Other peripherals will probably not be so tidy, and there the gaps will have to be filled with explicit reserved members or everything downstream shifts silently.
+
+Two things I would have got wrong without checking:
+
+- Members must be `volatile`. Without it the compiler may cache a read of `IDR`, drop a write to `ODR` it thinks is redundant, or reorder accesses.
+- `AFRL` and `AFRH` are one array, `AFR[2]`. They are split only because 16 pins times 4 bits is 64 bits and will not fit in one 32-bit register.
+
+## Proving the layout at compile time
+
+`static_assert(offsetof(GPIO_Regs, ODR) == 0x14, ...)` for every member, plus one on `sizeof`. This costs nothing at runtime and makes the build fail if anything is ever wrong.
+
+## Bits per pin varies by register, and nothing warns you
+
+This is where most of my mistakes landed. The field position is not `pin` across the board:
+
+| Register | Bits per pin | Position |
+|---|---|---|
+| `MODER`, `OSPEEDR`, `PUPDR` | 2 | `pin * 2` |
+| `OTYPER`, `IDR`, `ODR` | 1 | `pin` |
+| `AFR[pin / 8]` | 4 | `(pin % 8) * 4` |
+
+I accidentally used `pin * 2` on `OTYPER`, which is one bit per pin, so configuring pin 5 would have written bits 11:10 and reconfigured pins 10 and 11 instead. It compiles perfectly. The compiler has no idea what these registers mean.
+
+## BSRR exists to avoid read-modify-write
+
+Setting one bit of `ODR` normally takes read, modify, write. If an interrupt touches the same port between the read and the write, the write silently undoes its work.
+
+`BSRR` removes the read. Bits 15:0 set the matching `ODR` bit, bits 31:16 clear it, zeros do nothing, and it is write-only: a read always returns `0x0000`. One store, atomic, nothing to preserve.
+
+That last detail made my first attempt wrong in an interesting way. I wrote `port->BSRR |= 1u << pin`, which reads first. It produced the right answer, because the read returns zero and `0 | x == x`, so it worked for the wrong reason while being unable to clear a pin at all.
+
+## What made the driver testable
+
+Every function takes `GPIO_Regs *port` instead of hard-coding a base address. Firmware passes `GPIOA`; a test passes a zeroed struct on the stack. The driver cannot tell the difference, so the whole C layer becomes testable on the host with no board attached.
+
+The tests assert both that the target field changed and that its neighbours did not. I verified the suite catches real bugs rather than merely passing: reverting `gpio_write` to the swapped set/clear logic failed exactly the two `BSRR` tests and nothing else.
+
 # Mistakes and fixes
 
 ## ARM build: executable vs static library
