@@ -1,6 +1,7 @@
 #include "../drivers/include/bitops.h"
 #include "../drivers/include/systick.h"
 #include "gpio.h"
+#include "usart.h"
 #include "stm32c031_regs.h"
 #include <stdint.h>
 
@@ -16,6 +17,9 @@ static void clock_init(void){
 
     uint32_t volatile *RCC_IOPENR = (uint32_t volatile *)(0x40021000+0x34);
     *RCC_IOPENR |= 0b101;
+
+    uint32_t volatile *RCC_APBENR1 = (uint32_t volatile *)(0x40021000+0x3c);
+    *RCC_APBENR1 |= make_mask(17, 1);
 }
 
 int main(void) {
@@ -31,15 +35,25 @@ int main(void) {
     gpio_set_mode(GPIOC, 13, GPIO_MODE_INPUT);
     gpio_set_pull(GPIOC, 13, GPIO_PUPD_PU);
 
+    gpio_set_mode(GPIOA, 2, GPIO_MODE_ALTERNATE);
+    gpio_set_mode(GPIOA, 3, GPIO_MODE_ALTERNATE);
+    gpio_set_af(GPIOA, 2, GPIO_AFR_AF1);
+    gpio_set_af(GPIOA, 3, GPIO_AFR_AF1);
+   
+
 
 
     // uint32_t volatile *GPIOA_ODR = (uint32_t volatile *)(0x50000000 + 0x14);
     systick_init(12000);
+    uart_init(USART2, 12000000, 115200);
     while (1) {
         // *GPIOA_ODR = insert(*GPIOA_ODR, 1, 5, 1);
         // delay_ms(500);
         // *GPIOA_ODR = insert(*GPIOA_ODR, 0, 5, 1);
         // delay_ms(500);
+
+        uart_write_string(USART2, "hello\r\n");
+        delay_ms(500);
 
         if (gpio_read(GPIOC, 13) == 0) {
             gpio_write(GPIOA, 5, 1);

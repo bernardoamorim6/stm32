@@ -61,7 +61,7 @@ default alphabetical):
 Both tools need `compile_commands.json`, which the host configure step generates (via `CMAKE_EXPORT_COMPILE_COMMANDS`).
 
 ```bash
-clang-tidy -p build app/main.c tests/bitops_tests.cpp
+clang-tidy -p build app/main.c tests/bitops_tests.cpp drivers/src/gpio.c tests/gpio_tests.cpp drivers/src/usart.c
 cppcheck --enable=all drivers/ app/
 ```
 
@@ -324,7 +324,80 @@ Every function takes `GPIO_Regs *port` instead of hard-coding a base address. Fi
 
 The tests assert both that the target field changed and that its neighbours did not. I verified the suite catches real bugs rather than merely passing: reverting `gpio_write` to the swapped set/clear logic failed exactly the two `BSRR` tests and nothing else.
 
+# USART, from registers to picocom
+
+## Two clocks, not one
+
+Every peripheral here has a bus clock, gated by an `xxEN` bit in RCC. Without it the registers are dead: writes vanish, reads return zero. That is the same failure I already hit with `IOPENR` and GPIO.
+
+Some peripherals also have a *kernel* clock, which is what actually drives the internal logic, in a UART's case the baud rate generator. Its source can be selected independently in `RCC_CCIPR`, so a peripheral can keep a stable rate across a system clock change, or keep running in Stop mode.
+
+Two things I found referencing USART2 while hunting for the enable bit were
+`RCC_APBENR1->USART2EN` and  RCC_CR->HSIKERON`. They are not alternatives. `HSIKERON` forces HSI48 to stay running so it can feed peripheral kernels, and `USART2EN` is the bus gate. I needed the second one.
+
+It turns out `HSIKERON` cannot apply to USART2 on this part at all. `CCIPR`
+has a `USART1SEL` field and no `USART2SEL`, so USART2 has no kernel clock mux and is always fed from PCLK. The SVD's own description of `HSIKERON` claims HSI48 "can only feed USART1, USART2, and I2C1", which contradicts the register list in the same file. That text is family-level boilerplate across the C0 series. The field list for the specific part wins.
+
+The practical consequence is that the UART baud rate is coupled to the system clock. Changing `HSIDIV` later would break serial output as a side effect. USART1 could have been insulated from that.
+
+## ICR is not the status register
+
+I first wrote down `USART_ICR` at `0x20` as the status register. It is the interrupt flag *clear* register. The one to poll is `USART_ISR` at `0x1C`, directly below it. The C in the name is the whole difference and I read past it.
+
+## The register map has no gaps
+
+`0x00` to `0x2C`, twelve consecutive words: CR1, CR2, CR3, BRR, GTPR, RTOR, RQR, ISR, ICR, RDR, TDR, PRESC. So `USART_Regs` needed no reserved padding members, unlike what I was braced for after the warning that most peripherals are less tidy than GPIO.
+
+One oddity: the SVD lists CR1 and ISR *twice* each, as `_enabled` and `_disabled` variants. That is not a duplicate entry. It is the same register with two documented layouts depending on `FIFOEN`, where some bits change meaning and name. FIFO mode is off at reset and this driver leaves it off, so the non-FIFO layout applies. The offsets are identical either way, so the struct is unaffected.
+
+## The configuration is shorter than I expected
+
+Three control registers exist, and only CR1 needed touching. Everything 8N1 requires is already the reset value:
+
+| Field | Register | Reset | Meaning |
+|---|---|---|---|
+| `M1:M0` | CR1 bits 28, 12 | `00` | 8 data bits |
+| `PCE` | CR1 bit 10 | `0` | no parity |
+| `STOP` | CR2 bits 13:12 | `00` | 1 stop bit |
+| `OVER8` | CR1 bit 15 | `0` | oversample by 16 |
+
+Checking this was not wasted effort even though the answer was "change nothing". `OVER8` in particular decides whether the simple `BRR` formula applies, and `M0` and `M1` are not adjacent bits despite the manual presenting them as a two-bit value, which is the kind of thing that produces output that is almost right.
+
+Writing those fields anyway would have been harmless but dishonest: it would look like configuration when it is restating a default.
+
+## Order matters in two places
+
+`BRR` is only writable while the USART is disabled, so `uart_init` clears `UE` first. Clearing `UE` also resets every status flag in `ISR`, which is fine at init time. Then `TE`, then `UE` last.
+
+At the application level the peripheral clock has to be enabled before any USART or GPIO register write, for the same reason as the `IOPENR` lesson.
+
+## Why `uart_init` takes a clock frequency
+
+```c
+void uart_init(USART_Regs *usart, uint32_t pclk_hz, uint32_t baud);
+```
+
+Passing the clock rather than hard-coding a divisor keeps the arithmetic in one place and keeps the function testable off-target, the same reason the GPIO functions take a `GPIO_Regs *`. The divisor rounds to nearest, `(pclk_hz + baud / 2) / baud`, instead of truncating, which halves the worst case baud error.
+
 # Mistakes and fixes
+
+## -nostdlib drops libgcc, and Cortex-M0+ cannot divide
+
+Adding the UART driver broke the link:
+
+```
+undefined reference to `__aeabi_uidiv'
+```
+
+The offending line was `(pclk_hz + baud / 2) / baud` in `uart_init`. Cortex-M0+ has no hardware divide instruction, so a division with runtime operands compiles to a call into libgcc. My link line used `-nostdlib`, which drops libgcc along with libc.
+
+The two are not the same thing. libc is the C standard library, which a bare-metal target genuinely does not want. libgcc holds the compiler's own support routines: division, 64-bit arithmetic, floating point emulation. The compiler emits calls to them on its own initiative, so refusing to link it means ordinary C stops working for reasons that have nothing to do with the standard library.
+
+Fix: `target_link_libraries(firmware PRIVATE bitops gcc)`. No C library, but
+the routines the compiler needs are there. It cost about 100 bytes of Flash.
+
+The reason I had not hit this earlier is that every division in the GPIO driver is by a power-of-two constant, `pin / 8` and `pin % 8`, which the compiler turns into shifts and masks with no call at all.
+
 
 ## ARM build: executable vs static library
 

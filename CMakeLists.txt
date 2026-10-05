@@ -21,10 +21,16 @@ if(CMAKE_CROSSCOMPILING)
     drivers/src/startup.c
     drivers/src/systick.c
     drivers/src/gpio.c
+    drivers/src/usart.c
   )
   set_target_properties(firmware PROPERTIES SUFFIX ".elf")
 
-  target_link_libraries(firmware PRIVATE bitops)
+  # -nostdlib drops libgcc along with libc, but libgcc holds the compiler
+  # support routines. Cortex-M0+ has no hardware divide instruction, so any
+  # runtime division emits a call to __aeabi_uidiv. Linking libgcc back in is
+  # the standard bare-metal arrangement: no C library, but keep the routines
+  # the compiler itself needs.
+  target_link_libraries(firmware PRIVATE bitops gcc)
 
   target_link_options(firmware PRIVATE
     -nostdlib
