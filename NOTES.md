@@ -56,6 +56,34 @@ default alphabetical):
 - `top_of_stack` at `0x20003000` (SRAM origin + 12K).
 - `_la_data` matching `.data`'s LMA from `objdump`.
 
+## Strict warning check (one file, or all of them)
+
+Neither CMake build turns these on, so they are worth running by hand before
+showing a new driver to anyone:
+
+```bash
+gcc -fsyntax-only -Wall -Wextra -Wpedantic -std=c17 -Idrivers/include drivers/src/ringbuffer.c
+```
+
+`-fsyntax-only` means no object file is produced, so nothing is left lying
+around. Swap `gcc` for arm-none-eabi-gcc` to check it the way the firmware build will see it.
+
+Every source at once:
+
+```bash
+for f in drivers/src/*.c app/main.c; do
+  printf "%-28s " "$f"
+  out=$(arm-none-eabi-gcc -fsyntax-only -Wall -Wextra -Wpedantic -std=c17 -Idrivers/include "$f" 2>&1)
+  [ -z "$out" ] && echo clean || { echo WARNS; echo "$out" | head -4 | sed 's/^/    /'; }
+done
+```
+
+`-Wall -Wextra` is clean across the whole repo. `-Wpedantic` reports three things that are all deliberate, so I run it as a spot check rather than wiring it into the build:
+
+- `startup.c` casting `&top_of_stack` to a function pointer type. The vector
+  table's first entry is a stack address living in an array of function   pointers, so ISO C has no legal way to express it.
+- `0b111` style binary literals in `systick.c` and `main.c`. A GCC extension until C23, and far more readable than hex for register fields.
+
 ## Linting
 
 Both tools need `compile_commands.json`, which the host configure step generates (via `CMAKE_EXPORT_COMPILE_COMMANDS`).
@@ -379,7 +407,107 @@ void uart_init(USART_Regs *usart, uint32_t pclk_hz, uint32_t baud);
 
 Passing the clock rather than hard-coding a divisor keeps the arithmetic in one place and keeps the function testable off-target, the same reason the GPIO functions take a `GPIO_Regs *`. The divisor rounds to nearest, `(pclk_hz + baud / 2) / baud`, instead of truncating, which halves the worst case baud error.
 
+# Ring buffer
+
+## Why one exists at all
+
+An ISR runs at a moment nothing else chose and has to finish quickly. It cannot wait for `main` to be ready to deal with a byte. So the ISR drops the byte into a buffer and returns, and `main` takes bytes out whenever it gets around to it. Fixed size, no allocation, bounded memory, which is what I want on a part with 12 KB of SRAM.
+
+## Power of two, for the same reason as the UART divide
+
+Wrapping is `index & (RBSIZE - 1)` rather than `index % RBSIZE`. A modulo by a non-power-of-two would pull in `__aeabi_uidivmod` exactly like the baud rate division did, and for the same reason: Cortex-M0+ has no divide instruction. The mask is one instruction.
+
+That constrains the size to a power of two, which is not much of a constraint. 64 bytes at 115200 baud is about 5.6 ms of slack, since one byte takes 86.8 us.
+
+## head == tail is ambiguous, and the fix is one wasted byte
+
+When the two indices are equal, the buffer is either completely empty or completely full. Both look identical. Two standard ways out:
+
+**Waste one slot.** Full means advancing the producer's index would land on the consumer's. `head == tail` then only ever means empty.
+
+**Keep a count.** Full capacity, more obvious code.
+
+These are not equivalent, and the difference only shows up once the ISR exists. With the wasted slot and one producer and one consumer, the ISR writes only `head` and `main` writes only `tail`. Each side reads the other's index and never modifies it, so there is nothing to race: no critical section, no disabled interrupts.
+
+With a count, both sides write the same variable. `count++` on a Cortex-M0+ is a load, an add and a store, and an interrupt landing between the load and the store loses an update. Every put and get would need interrupts disabled around it.
+
+So the real trade is one byte against disabling interrupts in the hot path. I took the byte. A 64-slot array therefore holds 63, and the tests assert that number directly so nobody can quietly reclaim the spare slot.
+
+## Write first, then publish the index
+
+The producer stores the byte at `head`, and only then advances `head`. That order is not cosmetic. The index is what tells the consumer a slot is ready, so publishing it before the data is written lets the consumer read a slot that has not been filled.
+
+Same on the other side: read from `tail`, then advance `tail`.
+
+## volatile on the indices, not on the array
+
+`head` and `tail` are written by one context and read by the other, so the compiler must not cache them in a register across a loop. The 64 data bytes do not need it: they are handed over through the indices, and marking them volatile only blocks optimisation on every access for no correctness gain.
+
+My first version had `volatile` on the array and not much thought behind it.
+
+## Testing it, which is the whole point
+
+The buffer has no hardware dependency at all, so the test suite is the only place it runs today. 13 cases, covering the round trip, filling to exactly 63, draining to empty, the empty/full distinction at `head == tail`, wrap-around with indices mid-array, and interleaved traffic over a thousand iterations.
+
+Three cases test only the failure paths: a rejected put must move no index and corrupt no stored byte, a failed get must not write through its out-pointer, and a stored `0x00` must come back as data rather than look like emptiness.
+
+I checked the suite against deliberately broken code rather than trusting that passing tests mean anything:
+
+| Bug introduced | Tests that fail |
+|---|---|
+| `rb_is_full` comparing the wrong index | 6 |
+| Advancing an index without the `+ 1` | 11 |
+| Dropping the wrap mask entirely | 4 |
+| Writing through `out` before the empty check | 1 |
+
+That last one is the lesson. Exactly one test catches it, and it is one of the failure-path cases rather than anything from the obvious list. Every happy path still passes with the bug in place.
+
 # Mistakes and fixes
+
+## A mask does not advance an index
+
+My first ring buffer advanced its indices like this:
+
+```c
+ring->tail = ring->tail & (RBSIZE - 1);
+```
+
+That masks the current value. It does not add anything. `tail` is always below 64, so `tail & 63` is `tail`, and the line is a no-op. Both indices stayed at zero forever, every put wrote slot 0, every get read slot 0, and `head == tail` was permanently true.
+
+The `+ 1` is the advance. The mask only exists to catch the one case in 64 where the advance runs off the end, and it cannot do that if nothing advanced.
+
+The same missing `+ 1` made `rb_is_full` reduce to `tail == head`, which is the definition of empty, so the two predicates were the same function and a fresh buffer reported itself full.
+
+## Full is about the producer's index, not the consumer's
+
+Once the advance was fixed I still had:
+
+```c
+((ring->tail + 1) & (RBSIZE - 1)) == ring->head
+```
+
+`rb_put` writes at `head`, so `head` is the producer index and the `+ 1` belongs on it. As written the expression asks whether `head` is exactly one ahead of `tail`, which is the condition for holding exactly one byte. The buffer accepted a single byte and then rejected everything:
+
+```
+put 'A' -> ok         (head=1 tail=0)
+put 'B' -> REJECTED   (head=1 tail=0)
+```
+
+## There is no spare value to mean "empty"
+
+`rb_get` originally returned `uint8_t` and `return NULL` on an empty buffer. Two things wrong. `NULL` is a null pointer constant, so returning it from a `uint8_t` function is a type error that only compiles because GCC is lenient:
+
+```
+warning: returning 'void *' from a function with return type 'uint8_t'
+```
+
+And writing `return 0` instead would not have helped. All 256 values of a `uint8_t` are valid payload, so a caller receiving 0 cannot tell an empty buffer from a stored zero byte. The status has to travel separately:
+
+```c
+bool rb_get(RingBuffer *ring, uint8_t *out);
+```
+
+A later version kept the `bool` but had no `out` parameter, so it read the byte into a local and dropped it. `-Wall` caught that one on its own with `unused variable 'value'`.
 
 ## -nostdlib drops libgcc, and Cortex-M0+ cannot divide
 

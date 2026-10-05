@@ -22,6 +22,7 @@ if(CMAKE_CROSSCOMPILING)
     drivers/src/systick.c
     drivers/src/gpio.c
     drivers/src/usart.c
+    drivers/src/ringbuffer.c
   )
   set_target_properties(firmware PROPERTIES SUFFIX ".elf")
 
@@ -71,8 +72,20 @@ else()
     GTest::gtest_main
   )
 
+  add_executable(
+    ringbuffer_tests
+    tests/ringbuffer_tests.cpp
+    drivers/src/ringbuffer.c
+  )
+  target_link_libraries(
+    ringbuffer_tests
+    bitops
+    GTest::gtest_main
+  )
+
   include(GoogleTest)
   gtest_discover_tests(bitops_tests)
   gtest_discover_tests(gpio_tests)
+  gtest_discover_tests(ringbuffer_tests)
 
 endif()

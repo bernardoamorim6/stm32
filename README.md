@@ -30,6 +30,8 @@ This is a work in progress. What follows is what actually runs and is tested, no
 
 **UART driver, polled transmit** (`drivers/src/usart.c`) `uart_init`, `uart_write_byte` and `uart_write_string` on USART2, the instance wired to the on-board ST-LINK's virtual COM port. `uart_init` takes a `USART_Regs *`, the peripheral clock frequency and the desired baud rate, so the divisor is computed rather than hard-coded and the driver stays testable off-target. It clears `UE` before writing `BRR`, since that register is only writable while the USART is disabled, then sets `TE` and `UE` last. 8N1 is the reset state of `M1:M0`, `PCE` and `STOP`, so the driver leaves those fields alone rather than writing values it would only be restating. Transmit polls `TXE` in `ISR` before each store to `TDR`.
 
+**Ring buffer** (`drivers/src/ringbuffer.c`) A fixed 64-byte FIFO with no allocation, written for the interrupt-driven UART that comes next: an ISR drops bytes in and returns, `main` takes them out whenever it gets there. Indices wrap with `& (RBSIZE - 1)` rather than a modulo, because Cortex-M0+ has no divide instruction. One slot is left unused so that `head == tail` can only ever mean empty, which makes the single-producer, single-consumer case correct with no critical sections: the producer writes only `head`, the consumer writes only `tail`, and neither needs to disable interrupts. The alternative, a shared occupancy count, is written by both sides and would need one. Capacity is therefore 63 bytes, which several tests assert directly. Covered by 13 host tests.
+
 **Clock tree** The reset clock path is documented end to end in
 [`NOTES.md`](NOTES.md): HSI48 (48 MHz) -> `HSIDIV` ÷4 -> HSISYS -> `SW` mux ->
 `SYSDIV` ÷1 -> SYSCLK -> `HPRE` ÷1 -> HCLK = **12 MHz** at the core, with the controlling register field and bit range for each stage. Verified by reading `RCC_CR` off the chip at the reset halt, and by deliberately changing `HSIDIV` to ÷8 and observing the blink rate halve.
@@ -40,7 +42,7 @@ The scope below is the plan, not a promise, it gets revised as I go, and this se
 
 **C layer (C17), remaining:**
 
-- Interrupt-driven UART with TX/RX ring buffers (transmit currently polls `TXE`, and there is no receive path yet)
+- Interrupt-driven UART: the ring buffer exists and is tested, but nothing is wired to an ISR yet. Transmit still polls `TXE` and there is no receive path.
 - I²C master written from scratch, then a BME280 driver including the compensation maths
 - SSD1306 as a second address on the same bus. Enough to prove addressing and capture two devices sharing a bus, no display driver
 
@@ -159,7 +161,7 @@ Current firmware size:
 
 ```
    text    data     bss     dec     hex
-   2188       0       4    2192     890
+   2440       0       4    2444     98c
 ```
 
 ---
@@ -206,9 +208,9 @@ What this should show, and why it matters:
 
 ```
 0 .isr_vector   000000c0  08000000  08000000
-1 .text         000007cc  080000c0  080000c0
-2 .data         00000000  20000000  0800088c
-3 .bss          00000004  20000000  0800088c
+1 .text         000008c8  080000c0  080000c0
+2 .data         00000000  20000000  08000988
+3 .bss          00000004  20000000  08000988
 ```
 
 `.isr_vector` sits at `0x08000000`: the vector table has to be the first thing in Flash or the core can't find the initial stack pointer and reset vector on boot.
@@ -221,8 +223,8 @@ What this should show, and why it matters:
 
 ```
 app/                 application entry point
-drivers/include/     C headers (bitops.h, stm32c031_regs.h, gpio.h, systick.h, usart.h)
-drivers/src/         C sources (startup.c, systick.c, gpio.c, usart.c)
+drivers/include/     C headers (bitops.h, stm32c031_regs.h, gpio.h, systick.h, usart.h, ringbuffer.h)
+drivers/src/         C sources (startup.c, systick.c, gpio.c, usart.c, ringbuffer.c)
 hal/                 C++17 layer (empty until the C drivers exist)
 tests/               GoogleTest suites, host-only
 linker/              linker script
@@ -236,7 +238,7 @@ images/              measurement captures referenced from this README
 
 ## Testing a driver without hardware
 
-45 GoogleTest cases run on the host, with no board attached. That is possible because no driver function knows its own address:
+58 GoogleTest cases run on the host, with no board attached. That is possible because no driver function knows its own address:
 
 ```c
 void gpio_set_mode(GPIO_Regs *port, uint32_t pin, gpio_mode_t mode);
@@ -250,7 +252,18 @@ Each test asserts two things: the intended field took the intended value, and ne
 - `gpio_write` set and clear, checking `BSRR`'s two halves are not swapped
 - writing `11` then `01` to the same `MODER` field, which fails if the old value is OR'd rather than cleared first
 
-The suite has been checked against deliberately broken code, not just working code: swapping `BSRR`'s set and clear branches fails exactly those two tests and nothing else.
+The ring buffer is tested the same way, and it is the module where this pays off most, since off-by-one errors are the entire hazard. Alongside the obvious cases there are three that only check failure paths: that a rejected `put` moves no index and corrupts no stored byte, that a failed `get` does not write through its out-pointer, and that a stored `0x00` is returned as data rather than mistaken for emptiness.
+
+Both suites have been checked against deliberately broken code, not just working code. Swapping `BSRR`'s set and clear branches fails exactly the two GPIO write tests and nothing else. On the ring buffer:
+
+| Bug introduced | Tests that fail |
+|---|---|
+| `rb_is_full` comparing the wrong index | 6 |
+| Advancing an index without the `+ 1` | 11 |
+| Dropping the wrap mask entirely | 4 |
+| Writing through `out` before the empty check | 1 |
+
+The last row is the argument for writing failure-path tests at all. Only one case catches it, every happy path still passes, and without that single test the bug ships silently.
 
 ## CI
 
