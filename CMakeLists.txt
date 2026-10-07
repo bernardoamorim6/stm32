@@ -26,6 +26,19 @@ if(CMAKE_CROSSCOMPILING)
   )
   set_target_properties(firmware PROPERTIES SUFFIX ".elf")
 
+  # The UART ISR has a real time budget: at 115200 a byte arrives every 86.8 us,
+  # and echoing needs two interrupts per byte. At -O0 nothing is inlined, so
+  # every bitops and ring buffer helper becomes a call with a stack frame and
+  # one pass through the handler costs roughly 800 instructions, about 100 us at
+  # 12 MHz. That does not fit, and the receiver overruns continuously. -Og
+  # inlines them and brings the same path down to about 85 instructions.
+  #
+  # -fno-tree-loop-distribute-patterns is not needed at -Og but matters if this
+  # is ever raised to -O2: GCC then recognises the .bss zeroing loop in
+  # Reset_Handler as a memset and emits a call to it, which -nostdlib has not
+  # linked.
+  target_compile_options(firmware PRIVATE -Og -fno-tree-loop-distribute-patterns)
+
   # -nostdlib drops libgcc along with libc, but libgcc holds the compiler
   # support routines. Cortex-M0+ has no hardware divide instruction, so any
   # runtime division emits a call to __aeabi_uidiv. Linking libgcc back in is

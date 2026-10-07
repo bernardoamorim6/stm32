@@ -462,7 +462,142 @@ I checked the suite against deliberately broken code rather than trusting that p
 
 That last one is the lesson. Exactly one test catches it, and it is one of the failure-path cases rather than anything from the obvious list. Every happy path still passes with the bug in place.
 
+# Interrupts, and what each gate does
+
+## Three gates, all of which must be open
+
+An interrupt has to pass three independent checks to reach my code, and they live in three different places. Almost every "my interrupt does not fire" is one of these left shut.
+
+| Gate | Where | Question |
+|---|---|---|
+| Peripheral | `USART_CR1`: `RXNEIE`, `TXEIE` | does the peripheral request an interrupt for this event? |
+| NVIC | `NVIC_ISER` bit 28 | does the controller forward USART2's request to the core? |
+| Core | `PRIMASK` | is the core accepting interrupts at all? |
+
+The NVIC enable is a one-off at startup, `PRIMASK` is what critical sections touch, and the `CR1` bits get flipped constantly during normal operation.
+
+`NVIC_ISER` is a single register on Cortex-M0+, not an array, because the core supports at most 32 external interrupts. It is also write-1-to-set, so writing a bit sets it and writing a zero does nothing, which means no read-modify-write and no race.
+
+USART2 is IRQ 28. I confirmed that two ways: the position column in RM0490's interrupt table, and the vector address `0x000000B0`, which is 176, so word 44, and 44 minus the 16 core exceptions is 28.
+
+## Status flags and interrupt enables are different bits
+
+For each event there are two similarly named bits in two different registers. `USART_ISR` holds status flags set by hardware, true whether or not anyone is listening. `USART_CR1` holds enables that I set, saying "interrupt me when that flag is true". The interrupt fires only when both are set, which is exactly why the earlier polled transmit worked without any interrupt at all: it read `TXE` directly and never enabled `TXEIE`.
+
+## Some flags are cleared by doing the thing, not by writing ICR
+
+- `RXNE` is cleared by **reading `RDR`**
+- `TXE` is cleared by **writing `TDR`**
+- `ORE` is cleared by writing `ORECF` to `ICR`
+
+The first two matter a lot in a handler. If I see `RXNE` and do not read `RDR`, the flag stays set and the handler re-enters immediately, forever. So the read has to happen even when the ring is full and the byte will be dropped.
+
+## ORE will jam the receiver permanently
+
+If a byte arrives while `RXNE` is still set, `ORE` sets and that byte is lost. The part that bites is that reception stays jammed until `ORE` is cleared, so an unhandled overrun does not cost one byte, it kills the receive path for good. Sustained traffic is designed to provoke exactly this, so the load test would have found it even if nothing else did.
+
+## TXEIE has to be switched off again
+
+`TXE` means "`TDR` is free", which is true almost all the time, including when there is nothing to send. Leaving `TXEIE` enabled with an empty ring means the handler re-enters continuously and starves everything else. So the handler clears `TXEIE` when `rb_get` fails, and `uart_write_byte` sets it again on the next put. The interrupt switches itself off when the work is done.
+
+## The ISR needs no assembly and no attribute
+
+On Cortex-M the hardware stacks `r0-r3`, `r12`, `LR`, `PC` and `xPSR` on entry, and the `EXC_RETURN` value in `LR` makes the return unstack them. `r4-r11` are preserved by the ordinary calling convention. So a plain C function already satisfies everything an ISR needs. `__attribute__((interrupt))` exists for architectures like ARM7TDMI where the core stacks nothing; on Cortex-M it is unnecessary.
+
+The signature has to be exactly `void USART2_IRQHandler(void)` to match the vector table's type, and the name has to match the weak symbol exactly. A typo produces no error at all: the weak alias stays bound to `DefaultHandler` and the function is simply never called. I checked it with `nm` instead of trusting it:
+
+```
+08000354 T DefaultHandler
+0800087a T USART2_IRQHandler
+```
+
+and confirmed vector table word 44 reads `0x0800087b`, which is that address plus the Thumb bit.
+
+## Why the handler hard-codes USART2
+
+Everywhere else in this repo a driver takes a pointer so the address is not baked in. The handler cannot: the vector table is an array of `void (*)(void)` and the hardware calls it with no arguments.
+
+It does not need to either. Index 44 **is** USART2's slot, so a handler that referred to another instance would be wrong by definition. The same applies to the two ring buffers, which have to be file scope `static` because they cannot be passed in, exactly like the SysTick counter.
+
+# Critical sections on Cortex-M0+
+
+## What PRIMASK is
+
+A single bit inside the core. 1 means all maskable interrupts are held off, 0 means they are accepted. Pending interrupts do not vanish while it is set, they fire the moment it clears. It is not memory-mapped, so a pointer cannot reach it; `MRS` and `MSR` are the only way, which is why this needs inline assembly.
+
+`MRS` is Move to Register from Special, the read. `MSR` is Move to Special from Register, the write. ARM syntax puts the destination first in both, so the operand order is deliberately not symmetrical between them.
+
+## Save and restore, not disable and enable
+
+If `critical_exit` just ran `cpsie i`, then a critical section called from inside another one would turn interrupts back on when the inner one returned, and the rest of the outer region would run unprotected. Silent, depends on call depth, and only bites under load.
+
+| Step | PRIMASK before | Action | after |
+|---|---|---|---|
+| outer enters | 0 | saves 0, sets 1 | 1 |
+| inner enters | 1 | saves **1**, sets 1 | 1 |
+| inner exits | 1 | restores **1** | 1 |
+| outer exits | 1 | restores **0** | 0 |
+
+Interrupts come back exactly once, at the outermost exit, and only because that is where they were off to begin with.
+
+## GCC extended assembly, which I had not used before
+
+```c
+__asm__ volatile ( "template" : outputs : inputs : clobbers );
+```
+
+`%0`, `%1` in the template are the operands, numbered across outputs then
+inputs. `"=r" (var)` is an output in any general register; `"r" (var)` is an input. Empty sections still need their colons, so an input with no output is `:: "r" (x)` and clobbers with neither is `::: "memory"`.
+
+Two things that are not optional here:
+
+- `volatile`, or GCC deletes a statement whose output it cannot see being used
+- `"memory"` in the clobber list on the two boundary instructions, `cpsid i` and the `msr`. Without it GCC may move a load or store across them, and I would have a correct-looking critical section that protects nothing
+
+I checked the generated code rather than assuming:
+
+```
+mrs r1, PRIMASK
+cpsid i
+ldr r3, [r2]      <- the read-modify-write
+orrs r3, r0
+str r3, [r2]
+msr PRIMASK, r1
+```
+
+## Keep it short
+
+Every instruction with interrupts masked adds to the worst case latency before any interrupt can be serviced, including SysTick, which `delay_ms` depends on. `tx_start` is one register access between enter and exit for that reason.
+
 # Mistakes and fixes
+
+## -O0 does not inline anything, including static inline
+
+The first full speed echo test lost more than half the data, 4096 bytes out and 1853 back. I went looking for a race and the cause was the build settings.
+
+`CMAKE_C_FLAGS_DEBUG` was `-g` with no `-O` flag, which is `-O0`. At `-O0` GCC inlines nothing, so every `bitops` and ring buffer helper in the handler became a real call with a stack frame:
+
+| Build | ISR body | calls out | text |
+|---|---|---|---|
+| `-O0` | 87 instructions | 9 | 2868 |
+| `-Og` | 45 | 2 | 1464 |
+
+`extract` is 46 instructions and calls `make_mask`, which is 90 more. Counting callees, one pass through the handler was roughly 800 instructions, about 100 us at 12 MHz. A byte at 115200 takes 86.8 us and echoing needs two interrupts per byte, so the handler needed about 200 us per byte and had 86.8. About 2.3x over.
+
+Fix: `target_compile_options(firmware PRIVATE -Og ...)`. The same path drops to about 85 instructions, near 10 us, and all three load tests pass.
+
+What I take from this: an ISR has a time budget set by the hardware, and a debug build can miss it while a release build makes it. The honest check is counting the instructions against the byte time, not waiting to find out under load.
+
+## -O2 turns my .bss loop into a call to memset
+
+Raising the level to `-O2` fails to link:
+
+```
+ld: (memset): Unknown destination type (ARM/Thumb) in startup.c.obj
+```
+
+GCC recognises the zeroing loop in `Reset_Handler` as a `memset` and replaces it with a call. `memset` is in libc, which `-nostdlib` excludes on purpose. So the optimiser rewrote my hand-written loop into a call to a function I had deliberately not linked. `-fno-tree-loop-distribute-patterns` turns off that one transformation. `-Og` does not trigger it, but the flag is in `CMakeLists.txt` anyway so raising the level later does not reopen this.
+
 
 ## A mask does not advance an index
 

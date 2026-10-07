@@ -39,21 +39,27 @@ int main(void) {
     gpio_set_mode(GPIOA, 3, GPIO_MODE_ALTERNATE);
     gpio_set_af(GPIOA, 2, GPIO_AFR_AF1);
     gpio_set_af(GPIOA, 3, GPIO_AFR_AF1);
-   
 
+    uint32_t volatile *NVIC_ISER = (uint32_t volatile *)0xE000E100;
+    *NVIC_ISER = make_mask(28, 1);
 
 
     // uint32_t volatile *GPIOA_ODR = (uint32_t volatile *)(0x50000000 + 0x14);
     systick_init(12000);
     uart_init(USART2, 12000000, 115200);
+    uart_write_string(USART2, "echo ready\r\n");
     while (1) {
         // *GPIOA_ODR = insert(*GPIOA_ODR, 1, 5, 1);
         // delay_ms(500);
         // *GPIOA_ODR = insert(*GPIOA_ODR, 0, 5, 1);
         // delay_ms(500);
-
-        uart_write_string(USART2, "hello\r\n");
-        delay_ms(500);
+        /* Echo: whatever the ISR dropped into the RX ring goes back
+           out through the TX ring. Neither call blocks on the wire, so
+           button stays responsive. */
+        uint8_t byte;
+        if (uart_read_byte(&byte)) {
+            uart_write_byte(USART2, byte);
+        }
 
         if (gpio_read(GPIOC, 13) == 0) {
             gpio_write(GPIOA, 5, 1);

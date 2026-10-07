@@ -30,6 +30,10 @@ This is a work in progress. What follows is what actually runs and is tested, no
 
 **UART driver, polled transmit** (`drivers/src/usart.c`) `uart_init`, `uart_write_byte` and `uart_write_string` on USART2, the instance wired to the on-board ST-LINK's virtual COM port. `uart_init` takes a `USART_Regs *`, the peripheral clock frequency and the desired baud rate, so the divisor is computed rather than hard-coded and the driver stays testable off-target. It clears `UE` before writing `BRR`, since that register is only writable while the USART is disabled, then sets `TE` and `UE` last. 8N1 is the reset state of `M1:M0`, `PCE` and `STOP`, so the driver leaves those fields alone rather than writing values it would only be restating. Transmit polls `TXE` in `ISR` before each store to `TDR`.
 
+**Interrupt-driven UART** (`drivers/src/usart.c`) `USART2_IRQHandler` services both directions. Receive: the handler reads `RDR`, which is also what clears `RXNE`, and pushes into the RX ring. Transmit: `uart_write_byte` queues into the TX ring and enables `TXEIE`; the handler pops one byte per interrupt and clears `TXEIE` when the ring runs dry, since `TXE` is set almost permanently and would otherwise re-fire forever with nothing to send. `uart_write_byte` blocks when the ring is full rather than dropping, bounded by the 5.5 ms it takes to drain 63 bytes at 115200. Verified by echoing 16 KB through the board and comparing byte for byte.
+
+**Critical sections** (`drivers/include/critical.h`) Two `static inline` functions over `cpsid i` and `PRIMASK`, in inline assembly, since Cortex-M0+ has no `LDREX`/`STREX` and therefore no lock-free atomic read-modify-write. They save and restore the previous mask rather than unconditionally re-enabling, so a critical section nested inside another one cannot hand interrupts back early.
+
 **Ring buffer** (`drivers/src/ringbuffer.c`) A fixed 64-byte FIFO with no allocation, written for the interrupt-driven UART that comes next: an ISR drops bytes in and returns, `main` takes them out whenever it gets there. Indices wrap with `& (RBSIZE - 1)` rather than a modulo, because Cortex-M0+ has no divide instruction. One slot is left unused so that `head == tail` can only ever mean empty, which makes the single-producer, single-consumer case correct with no critical sections: the producer writes only `head`, the consumer writes only `tail`, and neither needs to disable interrupts. The alternative, a shared occupancy count, is written by both sides and would need one. Capacity is therefore 63 bytes, which several tests assert directly. Covered by 13 host tests.
 
 **Clock tree** The reset clock path is documented end to end in
@@ -42,7 +46,7 @@ The scope below is the plan, not a promise, it gets revised as I go, and this se
 
 **C layer (C17), remaining:**
 
-- Interrupt-driven UART: the ring buffer exists and is tested, but nothing is wired to an ISR yet. Transmit still polls `TXE` and there is no receive path.
+- A `printf`-style formatter over the UART. Output is currently raw bytes and strings only.
 - I²C master written from scratch, then a BME280 driver including the compensation maths
 - SSD1306 as a second address on the same bus. Enough to prove addressing and capture two devices sharing a bus, no display driver
 
@@ -145,6 +149,89 @@ What this does establish is that the 12 MHz figure the whole clock derivation re
 
 ---
 
+## Sharing a buffer between an ISR and main
+
+The UART has two ring buffers, one per direction, and they need different amounts of protection. Working out which needs what is the whole point of the exercise.
+
+### Receive needs no lock
+
+The handler only ever writes `head`. `main` only ever writes `tail`. Each index has exactly one writer, and each side only reads the other's. There is no read-modify-write of shared state anywhere, so there is nothing to make atomic.
+
+That argument needs two things to be true, and both are asserted in `ringbuffer.h` rather than assumed:
+
+- the indices are `volatile`, so the compiler cannot cache one in a register across a loop and miss an update made by the other context
+- a load or store of one index is a single instruction, so it can never be observed half-done. On Cortex-M0+ an aligned 32-bit access is one  instruction, which is why there are `static_assert`s on both the width and the alignment of `head` and `tail`
+
+Understanding why this is safe is worth more than reflexively disabling interrupts around it.
+
+### Transmit does
+
+The TX path shares something the RX path does not: the `TXEIE` bit. `main` sets it to say "I have queued work", and the handler clears it when the ring runs dry. Two writers, one piece of state.
+
+The hazard is not the bit itself but the register it lives in. `CR1` also holds `UE`, `TE`, `RE` and `RXNEIE`, and there is no way to set one bit without writing all 32:
+
+```
+LDR  r0, [CR1]
+ORR  r0, #0x80
+STR  r0, [CR1]
+```
+
+If the handler changes any bit of `CR1` between the load and the store, the store writes the stale value of every other bit back over it, and the handler's change silently disappears.
+
+This is the same hazard as a read-modify-write on GPIO's `ODR`, but with no way out. GPIO has `BSRR`, a write-only register that sets bits with a single store and never reads. `CR1` has no equivalent, and Cortex-M0+ has no `LDREX`/`STREX` either. Masking interrupts is the only tool left, which is what `critical.h` provides.
+
+One deliberate design choice narrows the problem further: `uart_write_byte` enables `TXEIE` **unconditionally** after every put, rather than first checking whether the ring was empty. That removes a check-then-act sequence entirely, so `main` can only ever set the bit and the handler can only ever clear it after observing an empty ring. The worst case left is a redundant interrupt that finds nothing to do. The critical section is protecting the read-modify-write, not a check-then-act race, and that is a more precise claim than "I put a lock around it".
+
+---
+
+## Measured: the ISR was too slow before it was wrong
+
+The first full-speed test lost more than half the data: 4096 bytes sent, 1853 returned. The cause was not a race. It was that the handler could not run fast enough, and the build settings were why.
+
+The ARM build had `CMAKE_C_FLAGS_DEBUG` set to `-g` with no `-O` flag, which means `-O0`. At `-O0` GCC inlines nothing, including functions marked `static inline`. Every `bitops` and ring buffer helper in the handler became a real call with its own stack frame:
+
+| Build | ISR body | Calls out of it | Firmware text |
+|---|---|---|---|
+| `-O0` | 87 instructions | **9** | 2868 |
+| `-Og` | 45 | 2 | 1464 |
+| `-O2` | 43 | 2 | 1576 |
+
+The nine calls are what cost. `extract` is 46 instructions on its own and calls `make_mask`, which is another 90, so three `extract` calls alone are over 400 instructions. Counting the callees, one pass through the handler was roughly **800 instructions**, about 1200 cycles, which at 12 MHz is near **100 us**.
+
+The budget is fixed by the line: at 115200 a byte takes **86.8 us**, and
+echoing needs two interrupts per byte, one to receive and one to transmit. So the handler needed about 200 us per byte and had 86.8. Roughly 2.3x over, which is why the receiver overran continuously.
+
+At `-Og` the same path is about 85 instructions, near 10 us, comfortably inside the budget. The fix was one line in `CMakeLists.txt`, and after it all three load tests passed.
+
+The lesson worth keeping is that an ISR has a real time budget set by the
+hardware, not by taste, and that a debug build can miss it while a release build makes it. Measuring the instruction count against the byte time is how you tell whether you are close to the edge, rather than discovering it under load.
+
+### Raising it to `-O2` breaks the link, interestingly
+
+```
+ld: (memset): Unknown destination type (ARM/Thumb) in startup.c.obj
+```
+
+At `-O2` GCC recognises the `.bss` zeroing loop in `Reset_Handler` as a
+`memset` and replaces the hand-written loop with a call to it. `memset` lives in libc, which `-nostdlib` deliberately excludes. The compiler optimised a loop into a call to a function the project had chosen not to link. `-fno-tree-loop-distribute-patterns` disables that one transformation. The flag is in `CMakeLists.txt` with a comment, even though `-Og` does not need it, so that raising the level later does not reopen the question.
+
+### How it was verified
+
+`tools/uart_loadtest.py`, standard library only, no pyserial. It pushes a
+counted pattern through the board's echo loop and compares byte for byte, while reading on a separate thread so both directions are busy at once. The pattern repeats every 251 bytes rather than every 256, so it never lines up with the 64 byte ring and a swapped or repeated block shows as a mismatch instead of hiding behind an identical byte.
+
+```bash
+python3 tools/uart_loadtest.py                  # 4096 bytes, 64 byte writes
+python3 tools/uart_loadtest.py --chunk 1        # one byte at a time
+python3 tools/uart_loadtest.py --bytes 16384    # wraps the rings ~260 times
+```
+
+The `--chunk 1` run matters most: it keeps both rings near empty, so `TXEIE` is enabled and disabled thousands of times instead of a handful, which is the condition the TX race needs. A ten byte test proves nothing here.
+
+The script reports when the first and last bytes arrived and prints an explicit `STALLED` line if data stops early, because a link that is merely slow and one that worked and then died look identical in a total byte count.
+
+---
+
 ## Hardware and toolchain
 
 | | |
@@ -161,7 +248,7 @@ Current firmware size:
 
 ```
    text    data     bss     dec     hex
-   2440       0       4    2444     98c
+   1464       0     148    1612     64c
 ```
 
 ---
@@ -208,12 +295,14 @@ What this should show, and why it matters:
 
 ```
 0 .isr_vector   000000c0  08000000  08000000
-1 .text         000008c8  080000c0  080000c0
-2 .data         00000000  20000000  08000988
-3 .bss          00000004  20000000  08000988
+1 .text         000004f8  080000c0  080000c0
+2 .data         00000000  20000000  080005b8
+3 .bss          00000094  20000000  080005b8
 ```
 
 `.isr_vector` sits at `0x08000000`: the vector table has to be the first thing in Flash or the core can't find the initial stack pointer and reset vector on boot.
+
+`.bss` is now 148 bytes: two 72-byte ring buffers and the SysTick counter.
 
 `.data` and `.bss` share a VMA of `0x20000000` but `.data`'s LMA is in Flash, because initialized globals are stored in the image and copied to SRAM at startup, which is exactly what the copy loop in `Reset_Handler` does. `.data` is currently empty and `.bss` holds only the SysTick tick counter, since the firmware has no initialized globals at the moment. Adding `uint32_t x = 0xDEADBEEF;` to `main.c` makes `.data` grow by four bytes and its LMA and VMA visibly diverge, which is the quickest way to watch the copy loop do something in the debugger.
 
@@ -223,7 +312,7 @@ What this should show, and why it matters:
 
 ```
 app/                 application entry point
-drivers/include/     C headers (bitops.h, stm32c031_regs.h, gpio.h, systick.h, usart.h, ringbuffer.h)
+drivers/include/     C headers (bitops.h, stm32c031_regs.h, gpio.h, systick.h, usart.h, ringbuffer.h, critical.h)
 drivers/src/         C sources (startup.c, systick.c, gpio.c, usart.c, ringbuffer.c)
 hal/                 C++17 layer (empty until the C drivers exist)
 tests/               GoogleTest suites, host-only
@@ -231,6 +320,7 @@ linker/              linker script
 cmake/               ARM toolchain file
 svd/                 CMSIS-SVD register descriptions (for the debugger)
 images/              measurement captures referenced from this README
+tools/               host-side test scripts (uart_loadtest.py)
 .github/workflows/   CI
 ```
 
