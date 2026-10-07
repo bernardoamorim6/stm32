@@ -1,0 +1,21 @@
+# Deliberately narrow. Each disabled check fights an embedded idiom on purpose.
+Checks: >
+  -*,
+  bugprone-*,
+  readability-*,
+  -readability-magic-numbers,
+  -readability-identifier-length,
+  -readability-function-cognitive-complexity,
+  -bugprone-easily-swappable-parameters
+
+# magic-numbers:          register code is bit positions and addresses from RM0490.
+# identifier-length:      p, rb, tx, rx are conventional in tests.
+# cognitive-complexity:   inflated by GoogleTest macro expansion, never fires on drivers.
+# easily-swappable:       true of gpio_write(port, pin, value); the C++ layer fixes it in types.
+
+HeaderFilterRegex: 'drivers/include/.*'
+
+CheckOptions:
+  # Linker script symbols. The leading underscore is the toolchain convention.
+  - key: bugprone-reserved-identifier.AllowedIdentifiers
+    value: '_sdata;_edata;_sbss;_ebss;_la_data;__vector_table'

@@ -4,78 +4,78 @@
 #include "../drivers/include/bitops.h"
 
 TEST(CreateMask, TwoBitFieldAtTen) {
-    EXPECT_EQ(make_mask(10, 2), 0xC00u);
+    EXPECT_EQ(make_mask(10, 2), 0xC00U);
 }
 
 TEST(CreateMask, SingleBitAtZero) {
-    EXPECT_EQ(make_mask(0, 1), 1u);
+    EXPECT_EQ(make_mask(0, 1), 1U);
 }
 
 TEST(CreateMask, TopBit) {
-    EXPECT_EQ(make_mask(31, 1), 0x80000000u);
+    EXPECT_EQ(make_mask(31, 1), 0x80000000U);
 }
 
 TEST(CreateMask, FullWidth) {
-    EXPECT_EQ(make_mask(0, 32), 0xFFFFFFFFu);
+    EXPECT_EQ(make_mask(0, 32), 0xFFFFFFFFU);
 }
 
 TEST(CreateMask, ZeroWidthIsZero) {
-    EXPECT_EQ(make_mask(5, 0), 0u);
+    EXPECT_EQ(make_mask(5, 0), 0U);
 }
 
 TEST(Extract, FieldAtPositionZero) {
-    EXPECT_EQ(extract(0xFFFFFFFF, 0, 2), 0x3u);
+    EXPECT_EQ(extract(0xFFFFFFFF, 0, 2), 0x3U);
 }
 
 TEST(Extract, ShiftsFieldDownToBitZero) {
     // Pin 5's MODER field (bits 11:10) holding mode "1" looks like 0x400 in the raw register;
     // extract should hand back the plain value 1, not the still-shifted 0x400.
-    EXPECT_EQ(extract(0x00000400, 10, 2), 0x1u);
+    EXPECT_EQ(extract(0x00000400, 10, 2), 0x1U);
 }
 
 TEST(Extract, FullWidth) {
-    EXPECT_EQ(extract(0xFFFFFFFF, 0, 32), 0xFFFFFFFFu);
+    EXPECT_EQ(extract(0xFFFFFFFF, 0, 32), 0xFFFFFFFFU);
 }
 
 TEST(Extract, TopBit) {
-    EXPECT_EQ(extract(0x80000000, 31, 1), 0x1u);
+    EXPECT_EQ(extract(0x80000000, 31, 1), 0x1U);
 }
 
 TEST(SetBits, SetMiddleBits) {
     // 100100100 -> 100111100
     uint32_t mask = make_mask(3, 3);
-    EXPECT_EQ(set_bits(0x124, mask), 0x13Cu);
+    EXPECT_EQ(set_bits(0x124, mask), 0x13CU);
 }
 
 TEST(SetBits, AlreadySetBitsAreUnchanged) {
-    EXPECT_EQ(set_bits(0xFF, 0x0F), 0xFFu);
+    EXPECT_EQ(set_bits(0xFF, 0x0F), 0xFFU);
 }
 
 TEST(SetBits, EmptyMaskIsNoOp) {
-    EXPECT_EQ(set_bits(0x55, 0), 0x55u);
+    EXPECT_EQ(set_bits(0x55, 0), 0x55U);
 }
 
 TEST(SetBits, FullMaskSetsEverything) {
-    EXPECT_EQ(set_bits(0, 0xFFFFFFFF), 0xFFFFFFFFu);
+    EXPECT_EQ(set_bits(0, 0xFFFFFFFF), 0xFFFFFFFFU);
 }
 
 TEST(ClearBits, ClearMiddleBits) {
     // 11100110 -> 10000110 (clears bits 6:3)
     uint32_t mask = make_mask(3, 4);
-    EXPECT_EQ(clear_bits(0xE6, mask), 0x86u);
+    EXPECT_EQ(clear_bits(0xE6, mask), 0x86U);
 }
 
 TEST(ClearBits, AlreadyClearBitsAreUnchanged) {
     uint32_t mask = make_mask(3, 4);
-    EXPECT_EQ(clear_bits(0x87, mask), 0x87u);
+    EXPECT_EQ(clear_bits(0x87, mask), 0x87U);
 }
 
 TEST(ClearBits, EmptyMaskIsNoOp) {
-    EXPECT_EQ(clear_bits(0x55, make_mask(5, 0)), 0x55u);
+    EXPECT_EQ(clear_bits(0x55, make_mask(5, 0)), 0x55U);
 }
 
 TEST(ClearBits, FullMaskClearsEverything) {
-    EXPECT_EQ(clear_bits(0xFFFFFFFF, make_mask(0, 32)), 0u);
+    EXPECT_EQ(clear_bits(0xFFFFFFFF, make_mask(0, 32)), 0U);
 }
 
 TEST(TestBits, AllBitsSet) {
@@ -100,7 +100,7 @@ TEST(TestBits, EmptyMaskIsAlwaysTrue) {
 
 TEST(Insert, WritesFieldIntoEmptyRegister) {
     // Pin 5's MODER field (bits 11:10) set to mode 1 -> 0x400
-    EXPECT_EQ(insert(0, 1, 10, 2), 0x400u);
+    EXPECT_EQ(insert(0, 1, 10, 2), 0x400U);
 }
 
 TEST(Insert, OverwritesPreviousValueInField) {
@@ -108,14 +108,14 @@ TEST(Insert, OverwritesPreviousValueInField) {
     // Catches a forgotten clear-before-OR step.
     uint32_t reg = insert(0, 0b11, 0, 2);
     reg = insert(reg, 0b01, 0, 2);
-    EXPECT_EQ(reg, 0b01u);
+    EXPECT_EQ(reg, 0b01U);
 }
 
 TEST(Insert, DoesNotDisturbNeighboringBits) {
-    EXPECT_EQ(insert(0xFFFFFFFF, 0b10, 4, 2), 0xFFFFFFEFu);
+    EXPECT_EQ(insert(0xFFFFFFFF, 0b10, 4, 2), 0xFFFFFFEFU);
 }
 
 TEST(Insert, TruncatesValueWiderThanField) {
     // value = 0b101 (3 bits) into a 2-bit field: the extra high bit must be discarded, not spill into the next field.
-    EXPECT_EQ(insert(0, 0b101, 0, 2), 0b01u);
+    EXPECT_EQ(insert(0, 0b101, 0, 2), 0b01U);
 }

@@ -571,6 +571,12 @@ Every instruction with interrupts masked adds to the worst case latency before a
 
 # Mistakes and fixes
 
+## My lint steps could not fail
+
+Both linters had been in CI for weeks and neither had ever been able to fail it. With no `.clang-tidy` file, clang-tidy runs a near-empty default set and reported zero findings on everything. cppcheck exits 0 regardless of findings unless given `--error-exitcode=1`. Once both could fail, they found 116 things between them.
+
+Two of cppcheck's were false positives worth recognising. It flagged `counter - start` in `delay_ms` as the same expression on both sides, because `start` was just assigned from `counter`; it does not account for `volatile` and the ISR moving `counter` in between. And it flagged the `.data` and `.bss` loops for comparing pointers to different objects, which is formally true of every startup file: the linker symbols are separate objects to the compiler, and only the linker knows they bound one region. Both are suppressed in `.cppcheck-suppressions`, scoped to their file, with the reason beside each.
+
 ## -O0 does not inline anything, including static inline
 
 The first full speed echo test lost more than half the data, 4096 bytes out and 1853 back. I went looking for a race and the cause was the build settings.

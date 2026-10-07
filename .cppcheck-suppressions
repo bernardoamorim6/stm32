@@ -1,0 +1,14 @@
+# cppcheck false positives, each scoped to the one file it applies to.
+
+# Toolchain headers are not on cppcheck's include path, and do not need to be.
+missingIncludeSystem
+
+# The .data and .bss loops compare linker symbols. Distinct objects to the
+# compiler; the linker guarantees they bound one region.
+comparePointers:drivers/src/startup.c
+
+# counter is volatile and moved by the ISR, so counter - start is not zero.
+duplicateExpression:drivers/src/systick.c
+
+# CALIB is never accessed but has to exist to keep the struct on the memory map.
+unusedStructMember:drivers/src/systick.c

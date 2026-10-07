@@ -367,14 +367,13 @@ The last row is the argument for writing failure-path tests at all. Only one cas
 
 Three jobs on every push and pull request ([`ci.yml`](.github/workflows/ci.yml)):
 
-- **host**: configure, build, run the full `ctest` suite
-- **build-arm**: install the pinned toolchain, cross-compile the firmware, and
-  report binary size
-- **lint**: `clang-tidy` (using the `compile_commands.json` CMake exports) and `cppcheck`
+- **host**: build and run the full `ctest` suite
+- **build-arm**: cross-compile with the pinned toolchain and post the binary size to the job summary
+- **lint**: `clang-tidy` and `cppcheck`, both able to fail the build
 
-The size report runs `arm-none-eabi-size` and writes it to the GitHub Actions
-job summary, so Flash and SRAM usage is visible on every push without digging
-through logs. Flash usage is `text + data`; SRAM usage is `data + bss`.
+Both builds use `-Wall -Wextra`. `-Werror` is a CMake option, `WARNINGS_AS_ERRORS`, that only CI turns on, so a warning blocks a merge without blocking a local edit-compile loop.
+
+[`.clang-tidy`](.clang-tidy) enables `bugprone-*` and `readability-*` and switches off four checks that fight deliberate embedded idioms, each with its reason in the file. One of them, `bugprone-easily-swappable-parameters`, is a real finding: in `gpio_write(port, pin, value)` nothing stops `pin` and `value` being swapped. The C++ layer is the answer to that, not a suppression.
 
 ---
 

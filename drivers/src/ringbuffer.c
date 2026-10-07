@@ -1,7 +1,7 @@
 #include "../include/ringbuffer.h"
 #include <stdint.h>
 
-bool rb_is_empty(RingBuffer *ring){
+bool rb_is_empty(const RingBuffer *ring){
     if (ring->tail == ring->head) {
         return true;
     }
@@ -11,7 +11,7 @@ bool rb_is_empty(RingBuffer *ring){
 /* Full is one slot short of head == tail. Sacrificing that slot is what lets
    head == tail mean empty and nothing else, which in turn is what keeps the
    single producer / single consumer case free of any locking. */
-bool rb_is_full(RingBuffer *ring){
+bool rb_is_full(const RingBuffer *ring){
     if (((ring->head + 1) & (RBSIZE - 1)) == ring->tail) {
         return true;
     }

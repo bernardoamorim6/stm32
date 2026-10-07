@@ -62,7 +62,7 @@ void gpio_set_otype(GPIO_Regs *port, uint32_t pin, gpio_type_t type);
 void gpio_set_pull(GPIO_Regs *port, uint32_t pin, gpio_pupd_t pull);
 void gpio_set_af(GPIO_Regs *port, uint32_t pin, gpio_af_t mode);
 void gpio_write(GPIO_Regs *port, uint32_t pin, uint32_t value);
-uint32_t gpio_read(GPIO_Regs *port, uint32_t pin);
+uint32_t gpio_read(const GPIO_Regs *port, uint32_t pin);
 
 
 #ifdef __cplusplus

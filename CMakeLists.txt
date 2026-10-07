@@ -13,6 +13,14 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(bitops INTERFACE)
 target_include_directories(bitops INTERFACE drivers/include)
 
+# Warnings on everywhere, but only fatal in CI: -Werror in a local
+# edit-compile loop gets in the way more than it helps.
+option(WARNINGS_AS_ERRORS "Treat warnings as errors (CI sets this)" OFF)
+set(PROJECT_WARNINGS -Wall -Wextra)
+if(WARNINGS_AS_ERRORS)
+  list(APPEND PROJECT_WARNINGS -Werror)
+endif()
+
 if(CMAKE_CROSSCOMPILING)
   # ARM build: executable target
   add_executable(
@@ -37,7 +45,7 @@ if(CMAKE_CROSSCOMPILING)
   # is ever raised to -O2: GCC then recognises the .bss zeroing loop in
   # Reset_Handler as a memset and emits a call to it, which -nostdlib has not
   # linked.
-  target_compile_options(firmware PRIVATE -Og -fno-tree-loop-distribute-patterns)
+  target_compile_options(firmware PRIVATE -Og -fno-tree-loop-distribute-patterns ${PROJECT_WARNINGS})
 
   # -nostdlib drops libgcc along with libc, but libgcc holds the compiler
   # support routines. Cortex-M0+ has no hardware divide instruction, so any
@@ -95,6 +103,10 @@ else()
     bitops
     GTest::gtest_main
   )
+
+  foreach(t bitops_tests gpio_tests ringbuffer_tests)
+    target_compile_options(${t} PRIVATE ${PROJECT_WARNINGS})
+  endforeach()
 
   include(GoogleTest)
   gtest_discover_tests(bitops_tests)

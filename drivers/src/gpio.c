@@ -36,12 +36,12 @@ void gpio_set_af(GPIO_Regs *port, uint32_t pin, gpio_af_t mode){
    land in the middle of it. It is write-only, a read returns 0. */
 void gpio_write(GPIO_Regs *port, uint32_t pin, uint32_t value){
     if (value == 1) {
-        port->BSRR = 1u << pin;
+        port->BSRR = 1U << pin;
     } else {
-        port->BSRR = 1u << (pin + 16);
+        port->BSRR = 1U << (pin + 16);
     }
 }
 
-uint32_t gpio_read(GPIO_Regs *port, uint32_t pin){
+uint32_t gpio_read(const GPIO_Regs *port, uint32_t pin){
     return extract(port->IDR, pin , 1);
 }

@@ -15,8 +15,8 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Configure 
-      run: cmake -S . -B build
+    - name: Configure
+      run: cmake -S . -B build -DWARNINGS_AS_ERRORS=ON
 
     - name: Build
       run: cmake --build build
@@ -37,7 +37,7 @@ jobs:
         release: '15.3.Rel1'
 
     - name: Configure (ARM toolchain) 
-      run: cmake -S . -B build-arm -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake
+      run: cmake -S . -B build-arm -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi.cmake -DWARNINGS_AS_ERRORS=ON
 
     - name: Build firmware
       run: cmake --build build-arm
@@ -66,7 +66,12 @@ jobs:
       run: cmake -S . -B build
 
     - name: Run clang-tidy
-      run: clang-tidy -p build app/main.c tests/bitops_tests.cpp drivers/src/gpio.c tests/gpio_tests.cpp drivers/src/usart.c drivers/src/ringbuffer.c tests/ringbuffer_tests.cpp
+      run: >
+        clang-tidy -p build --quiet --warnings-as-errors='*'
+        app/main.c drivers/src/*.c tests/*.cpp
 
     - name: Run cppcheck
-      run: cppcheck --enable=all drivers/ app/
+      run: >
+        cppcheck --enable=warning,style,performance,portability
+        --error-exitcode=1 --suppressions-list=.cppcheck-suppressions
+        --quiet -Idrivers/include drivers/ app/

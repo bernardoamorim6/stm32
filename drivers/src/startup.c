@@ -9,7 +9,7 @@ extern int main();
 
 void Reset_Handler(void){
     // Copy .data from Flash to RAM
-    uint32_t *src = &_la_data;
+    const uint32_t *src = &_la_data;
     uint32_t *dst = &_sdata;
     while (dst < &_edata) {
         *dst++ = *src++;

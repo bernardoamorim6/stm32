@@ -116,10 +116,14 @@ TEST(RingBufferWrap, SecondFillWorksWithIndicesPastTheEnd) {
     RingBuffer rb = blank_buffer();
     uint8_t out = 0;
 
-    for (int i = 0; i < kCapacity; i++) ASSERT_TRUE(rb_put(&rb, static_cast<uint8_t>(i)));
-    for (int i = 0; i < kCapacity; i++) ASSERT_TRUE(rb_get(&rb, &out));
+    for (int i = 0; i < kCapacity; i++) {
+        ASSERT_TRUE(rb_put(&rb, static_cast<uint8_t>(i)));
+    }
+    for (int i = 0; i < kCapacity; i++) {
+        ASSERT_TRUE(rb_get(&rb, &out));
+    }
 
-    ASSERT_NE(rb.head, 0u) << "indices should not be back at the start";
+    ASSERT_NE(rb.head, 0U) << "indices should not be back at the start";
 
     for (int i = 0; i < kCapacity; i++) {
         EXPECT_TRUE(rb_put(&rb, static_cast<uint8_t>(100 + i)));
@@ -140,13 +144,13 @@ TEST(RingBufferWrap, IndicesStayInsideTheArray) {
     for (int cycle = 0; cycle < 10; cycle++) {
         for (int i = 0; i < kCapacity; i++) {
             ASSERT_TRUE(rb_put(&rb, static_cast<uint8_t>(i)));
-            ASSERT_LT(rb.head, RBSIZE);
-            ASSERT_LT(rb.tail, RBSIZE);
+            ASSERT_LT(rb.head, static_cast<uint32_t>(RBSIZE));
+            ASSERT_LT(rb.tail, static_cast<uint32_t>(RBSIZE));
         }
         for (int i = 0; i < kCapacity; i++) {
             ASSERT_TRUE(rb_get(&rb, &out));
-            ASSERT_LT(rb.head, RBSIZE);
-            ASSERT_LT(rb.tail, RBSIZE);
+            ASSERT_LT(rb.head, static_cast<uint32_t>(RBSIZE));
+            ASSERT_LT(rb.tail, static_cast<uint32_t>(RBSIZE));
         }
     }
 }
@@ -178,7 +182,9 @@ TEST(RingBufferInterleaved, PartialDrainsKeepOrder) {
 
     for (int round = 0; round < 200; round++) {
         for (int i = 0; i < 3; i++) {
-            if (rb_put(&rb, static_cast<uint8_t>(produced))) produced++;
+            if (rb_put(&rb, static_cast<uint8_t>(produced))) {
+                produced++;
+            }
         }
         for (int i = 0; i < 2; i++) {
             if (rb_get(&rb, &out)) {

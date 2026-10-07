@@ -10,9 +10,13 @@ extern "C" {
 
 // Creates a mask of 'width' ones starting at 'position'
 static inline uint32_t make_mask(uint32_t position, uint32_t width) {
-    if (width == 0) return 0;
+    if (width == 0) {
+        return 0;
+    }
     // Handle edge case where width is 32 to prevent undefined behavior
-    if (width >= 32) return 0xFFFFFFFFU; 
+    if (width >= 32) {
+        return 0xFFFFFFFFU;
+    }
     
     uint32_t mask = (1U << width) - 1;
     return mask << position;
@@ -40,10 +44,7 @@ static inline uint32_t clear_bits(uint32_t reg, uint32_t mask) {
 
 // Returns whether bits are set
 static inline bool test_bits(uint32_t reg, uint32_t mask) {
-    if ((reg | mask) == reg) {
-        return true;
-    }
-    return false;
+    return (reg | mask) == reg;
 }
 
 
