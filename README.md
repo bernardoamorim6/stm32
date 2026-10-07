@@ -6,6 +6,13 @@ Every register definition, the linker script, the vector table and the reset han
 
 I did use ST's debugger nad flashing tools, I only wanted to use hand written instead of generated code, not refuse vendor tooling.
 
+**If you only read four things:**
+
+- [Trimming the internal oscillator](#trimming-it-out) from +0.5% to -0.06% error, and working out where the granularity floor is rather than stopping when it looked good enough
+- [One UART bit measured at 8.625 µs](#the-independent-measurement) against 8.667 predicted, with an honest note on why the analyser cannot resolve the difference
+- [An interrupt handler that was 2.3x over its time budget](#measured-the-isr-was-too-slow-before-it-was-wrong), found by counting instructions against the 86.8 µs byte time rather than guessing at a race
+- [A test suite checked against deliberately broken code](#testing-a-driver-without-hardware), because passing tests only prove the tests run
+
 ---
 
 ## Status
@@ -37,7 +44,7 @@ This is a work in progress. What follows is what actually runs and is tested, no
 **Ring buffer** (`drivers/src/ringbuffer.c`) A fixed 64-byte FIFO with no allocation, written for the interrupt-driven UART that comes next: an ISR drops bytes in and returns, `main` takes them out whenever it gets there. Indices wrap with `& (RBSIZE - 1)` rather than a modulo, because Cortex-M0+ has no divide instruction. One slot is left unused so that `head == tail` can only ever mean empty, which makes the single-producer, single-consumer case correct with no critical sections: the producer writes only `head`, the consumer writes only `tail`, and neither needs to disable interrupts. The alternative, a shared occupancy count, is written by both sides and would need one. Capacity is therefore 63 bytes, which several tests assert directly. Covered by 13 host tests.
 
 **Clock tree** The reset clock path is documented end to end in
-[`NOTES.md`](NOTES.md): HSI48 (48 MHz) -> `HSIDIV` ÷4 -> HSISYS -> `SW` mux ->
+[`docs/NOTES.md`](docs/NOTES.md): HSI48 (48 MHz) -> `HSIDIV` ÷4 -> HSISYS -> `SW` mux ->
 `SYSDIV` ÷1 -> SYSCLK -> `HPRE` ÷1 -> HCLK = **12 MHz** at the core, with the controlling register field and bit range for each stage. Verified by reading `RCC_CR` off the chip at the reset halt, and by deliberately changing `HSIDIV` to ÷8 and observing the blink rate halve.
 
 ### Not yet implemented
@@ -280,7 +287,7 @@ The split is driven by `if(CMAKE_CROSSCOMPILING)` in the top-level `CMakeLists.t
 STM32_Programmer_CLI -c port=SWD -w build-arm/firmware.elf -rst
 ```
 
-**Debugging:** `.vscode/launch.json` is configured for Cortex-Debug with ST-LINK, halting at `Reset_Handler` and loading `svd/STM32C031.svd` for the peripheral register view.
+**Debugging:** [`.vscode/launch.json`](.vscode/launch.json) is configured for Cortex-Debug with ST-LINK, halting at `Reset_Handler` and loading `svd/STM32C031.svd` for the peripheral register view. The `serverpath`, `stm32cubeprogrammer` and `gdbPath` entries are absolute paths to my toolchain install and will need changing elsewhere.
 
 ---
 
@@ -321,6 +328,7 @@ cmake/               ARM toolchain file
 svd/                 CMSIS-SVD register descriptions (for the debugger)
 images/              measurement captures referenced from this README
 tools/               host-side test scripts (uart_loadtest.py)
+docs/                NOTES.md, the working log (reference PDFs are gitignored)
 .github/workflows/   CI
 ```
 
@@ -372,10 +380,10 @@ through logs. Flash usage is `text + data`; SRAM usage is `data + bss`.
 
 ## What I got wrong
 
-[`NOTES.md`](NOTES.md) is a running log of the mistakes I made building this and what fixed each one: kept because most of them are easy to repeat. A sample:
+[`docs/NOTES.md`](docs/NOTES.md) is a running log of the mistakes I made building this and what fixed each one: kept because most of them are easy to repeat. A sample:
 
 - **The SVD disagrees with the reference manual.** ST's own `STM32C031.svd` gives `RCC_CR` a reset value of `0x00000500`, putting `HSIDIV` at ÷1 and implying a 48 MHz boot clock. RM0490 says ÷4, and its revision history records the correction. I read the register off the chip and got `0x00001540`. The manual is right, the SVD is wrong on two fields, and the silicon settles it.
 - **A vector table entry is one greater than the function it points to.** `Reset_Handler` is at `0x08000218`; the table holds `0x08000219`. That's the Thumb bit, and a cleared bit 0 means an immediate HardFault.
 - **A blinking LED hid a wrong register read.** My first read-modify-write on `ODR` read `MODER` instead. The LED blinked correctly anyway, because bit 5 was still being set and cleared as intended, so the symptom I was watching for was present while the code was wrong.
 
-`NOTES.md` also holds the full clock-path derivation and a written answer to "what happens between reset and `main()`".
+`docs/NOTES.md` also holds the full clock-path derivation and a written answer to "what happens between reset and `main()`".

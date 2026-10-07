@@ -8,6 +8,9 @@ bool rb_is_empty(RingBuffer *ring){
     return false;
 }
 
+/* Full is one slot short of head == tail. Sacrificing that slot is what lets
+   head == tail mean empty and nothing else, which in turn is what keeps the
+   single producer / single consumer case free of any locking. */
 bool rb_is_full(RingBuffer *ring){
     if (((ring->head + 1) & (RBSIZE - 1)) == ring->tail) {
         return true;
@@ -15,6 +18,8 @@ bool rb_is_full(RingBuffer *ring){
     return false;
 }
 
+/* Store, then publish the index. The other side treats head as the signal that
+   a slot is ready, so advancing first would expose an unwritten slot. */
 bool rb_put(RingBuffer *ring, uint8_t value){
     if (rb_is_full(ring)) {
         return false;

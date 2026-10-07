@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug firmware (ST-Link)",
+            "type": "cortex-debug",
+            "request": "launch",
+            "cwd": "${workspaceFolder}",
+            "executable": "${workspaceFolder}/build-arm/firmware.elf",
+            "servertype": "stlink",
+            "device": "STM32C031C6",
+            "interface": "swd",
+            "runToEntryPoint": "Reset_Handler",
+            "svdFile": "${workspaceFolder}/svd/STM32C031.svd",
+            "serverpath": "/opt/st/stm32cubeclt_1.22.0/STLink-gdb-server/bin/ST-LINK_gdbserver",
+            "stm32cubeprogrammer": "/opt/st/stm32cubeclt_1.22.0/STM32CubeProgrammer/bin",
+            "gdbPath": "/opt/arm-gnu-toolchain/bin/arm-none-eabi-gdb"
+        }
+    ]
+}

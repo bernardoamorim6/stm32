@@ -1,4 +1,7 @@
 build*
-.vscode
-docs
 *.o
+
+# Reference manuals and ST's vendor header: large, and not mine to redistribute.
+# docs/ otherwise holds this project's own markdown.
+docs/*.pdf
+docs/*.h

@@ -4,6 +4,10 @@
 #include "stdint.h"
 
 
+/* Field width per pin is not uniform across these registers and nothing warns
+   you if you get it wrong: MODER, OSPEEDR and PUPDR are 2 bits at pin * 2,
+   OTYPER and IDR are 1 bit at pin, and AFR is 4 bits spread over two words. */
+
 void gpio_set_mode(GPIO_Regs *port, uint32_t pin, gpio_mode_t mode){
     port->MODER = insert(port->MODER, mode, pin * 2, 2);
 }
@@ -21,10 +25,15 @@ void gpio_set_pull(GPIO_Regs *port, uint32_t pin, gpio_pupd_t pull){
     port->PUPDR = insert(port->PUPDR, pull, pin*2, 2);
 }
 
+/* 16 pins at 4 bits each needs 64 bits, so the field lives in AFR[0] for pins
+   0-7 and AFR[1] for 8-15. */
 void gpio_set_af(GPIO_Regs *port, uint32_t pin, gpio_af_t mode){
     port->AFR[pin / 8] = insert(port->AFR[pin / 8], mode, (pin % 8) * 4, 4);
 }
 
+/* BSRR rather than a read-modify-write on ODR: bits 15:0 set, 31:16 clear,
+   zeros do nothing. One store, so an interrupt touching the same port cannot
+   land in the middle of it. It is write-only, a read returns 0. */
 void gpio_write(GPIO_Regs *port, uint32_t pin, uint32_t value){
     if (value == 1) {
         port->BSRR = 1u << pin;
