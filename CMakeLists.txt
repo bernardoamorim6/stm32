@@ -133,18 +133,18 @@ else()
   gtest_discover_tests(ringbuffer_tests)
   gtest_discover_tests(reg_tests)
 
-  # Compile-time rejection tests. Each source must fail to build, and with the
-  # expected static_assert message, so a typo cannot make one pass by accident.
-  foreach(case value_too_wide:value\ does\ not\ fit\ in\ field
-               field_past_bit_31:field\ must\ be\ 1-32\ bits)
-    string(REPLACE ":" ";" parts "${case}")
-    list(GET parts 0 name)
-    list(GET parts 1 expected)
+  # A test that passes only if the source FAILS to compile, and with the
+  # expected static_assert message, so a typo cannot make it pass by accident.
+  function(add_compile_fail_test name expected_message)
     add_executable(compile_fail_${name} EXCLUDE_FROM_ALL tests/compile_fail/${name}.cpp)
     target_link_libraries(compile_fail_${name} hal)
     add_test(NAME CompileFail.${name}
              COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target compile_fail_${name})
-    set_tests_properties(CompileFail.${name} PROPERTIES PASS_REGULAR_EXPRESSION "${expected}")
-  endforeach()
+    set_tests_properties(CompileFail.${name} PROPERTIES
+                         PASS_REGULAR_EXPRESSION "${expected_message}")
+  endfunction()
+
+  add_compile_fail_test(value_too_wide    "value does not fit in field")
+  add_compile_fail_test(field_past_bit_31 "field must be 1-32 bits")
 
 endif()

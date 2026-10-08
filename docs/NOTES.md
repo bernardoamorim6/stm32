@@ -624,6 +624,119 @@ The plan claimed function-local statics need nothing. I checked: one with a non-
 
 Byte-for-byte identical output for `insert()` with constants and `Field::write<1>()`, 24 bytes each at `-O2`. The C driver is 44 bytes, but that compares a generic function against a constant-folded one, so it is not a fair fight in either direction. Details and the reproducible script are in the README.
 
+# How the tests work, for studying
+
+## Why the test files are C++ when the code is C
+
+GoogleTest is a C++ framework, so the test files are `.cpp`. They include the C driver headers directly, which only links because every driver header has `extern "C"` guards: without them C++ looks for name-mangled symbols and the linker reports `undefined reference` to functions that plainly exist.
+
+## Anatomy of a test
+
+```cpp
+#include <gtest/gtest.h>
+#include "gpio.h"
+
+TEST(GpioSetMode, OutputOnPin5) {             // suite name, test name
+    GPIO_Regs p = blank_port();                // arrange: a zeroed fake port
+    gpio_set_mode(&p, 5, GPIO_MODE_OUTPUT);    // act
+    EXPECT_EQ(p.MODER, 1U << 10);              // assert
+}
+```
+
+- There is no `main()`. Linking `GTest::gtest_main` supplies one that finds every `TEST` and runs it.
+- `gtest_discover_tests(...)` in CMake registers each `TEST` with `ctest` individually, which is why `ctest` lists 70 tests instead of 4 executables.
+- `EXPECT_*` records a failure and carries on. `ASSERT_*` records it and stops that test. Use `ASSERT_` when carrying on would be meaningless: the ring buffer tests fill the buffer with `ASSERT_TRUE(rb_put(...))`, because if a put fails during setup, every check after it is noise.
+- Arrange, act, assert. Almost every test here has that shape.
+
+## Fakes: the same trick in two languages
+
+The whole host-testing strategy is "the code under test cannot tell real hardware from a stand-in".
+
+**C, swapped at run time.** The driver takes a `GPIO_Regs *`. Firmware passes `GPIOA`, the real address. The test passes `&p`, an ordinary struct on the stack.
+
+**C++, swapped at compile time.** `Reg<Address, Backend>` takes the backend as a template parameter. Firmware uses `Mmio`. The test uses:
+
+```cpp
+struct Fake {
+    static inline std::uint32_t mem[8] = {};
+    static std::uint32_t read(std::uintptr_t address) { return mem[address]; }
+    static void write(std::uintptr_t address, std::uint32_t value) { mem[address] = value; }
+};
+```
+
+Same two functions as `Mmio`, so `Reg<3, Fake>` compiles exactly like `Reg<0x50000000U, Mmio>`, but "address 3" means `mem[3]`. `static inline` on a data member is C++17: it defines the one shared array right there, with no separate definition in a `.cpp` file.
+
+## Fixtures, and why only the C++ tests needed one
+
+`Fake::mem` is `static`, so it survives from one test to the next. Without a reset, one test's leftovers leak into the next and the result depends on the order tests run in. A fixture is a class whose `SetUp()` runs before every test that uses it:
+
+```cpp
+class RegTest : public ::testing::Test {
+protected:
+    void SetUp() override { std::fill(std::begin(Fake::mem), std::end(Fake::mem), 0U); }
+};
+
+TEST_F(RegTest, WriteLandsAtItsAddressOnly) { ... }   // TEST_F, fixture name first
+```
+
+The C tests never needed one: `blank_port()` returns a fresh zeroed struct every time, so there is nothing shared to leak.
+
+## What a register test should assert
+
+Two things, every time: the intended field took the intended value, **and the neighbours did not move**. Plus one test that writes a field twice (`11` then `01`) and expects `01`, which catches a missing clear step. Most register bugs are collateral damage, not a wrong value in the right place.
+
+## Compile-fail tests
+
+**The problem.** A normal test is code that runs. A `static_assert` stops code from existing at all, so no normal test can check one.
+
+**The answer.** A file that must not compile, and a test whose pass condition is "the build failed":
+
+```cpp
+#include "reg.hpp"
+struct Fake {   // minimal: does nothing, only has to exist
+    static std::uint32_t read(std::uintptr_t) { return 0; }
+    static void write(std::uintptr_t, std::uint32_t) {}
+};
+int main() { hal::Field<hal::Reg<0, Fake>, 10, 2>::write<4>(); }
+```
+
+It has a real `main()` on purpose. If the guard were ever removed, this file must compile **and link** cleanly, so the only thing that can make it fail is the `static_assert`.
+
+**The CMake**, line by line:
+
+```cmake
+function(add_compile_fail_test name expected_message)
+  add_executable(compile_fail_${name} EXCLUDE_FROM_ALL tests/compile_fail/${name}.cpp)
+  target_link_libraries(compile_fail_${name} hal)
+  add_test(NAME CompileFail.${name}
+           COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target compile_fail_${name})
+  set_tests_properties(CompileFail.${name} PROPERTIES
+                       PASS_REGULAR_EXPRESSION "${expected_message}")
+endfunction()
+```
+
+- `EXCLUDE_FROM_ALL`: the normal `cmake --build` skips this target. Otherwise every ordinary build would fail.
+- `add_test(... COMMAND cmake --build ... --target ...)`: the "test" is simply running the compiler on that one target.
+- `PASS_REGULAR_EXPRESSION`: normally `ctest` passes when the command exits 0. With this property it passes only if the output **contains that text**, whatever the exit code. A successful build prints no `static_assert` message, so it fails.
+
+**Why match the message rather than just "it failed".** A typo in the bad file also fails to compile. Without the message match, that test would pass while proving nothing.
+
+## Testing the tests
+
+A test that has never failed has not shown it can. So for every suite I broke the code on purpose and checked that the right tests failed, and only those: swapped `BSRR` halves for GPIO, four ring buffer bugs, both compile-time guards removed one at a time.
+
+## Exercises
+
+Try each without looking at the existing tests first.
+
+1. A GoogleTest for `extract` from `bitops.h`: a 4-bit field at position 28 in `0xA0000000`.
+2. A `Fake`-backed test that `Pa5Mode::read()` ignores a neighbouring field at bits 13:12.
+3. A third compile-fail test for a zero-width field, `Field<R, 0, 0>`. Which message must it match? It needs one new file and one new line of CMake.
+4. Delete the clear step from `Field::write`, so it ORs the value in without `& ~mask`. Predict which of the 10 `reg_tests` fail, then run them.
+5. Out loud, as if in an interview: why must a compile-fail test match the error message?
+
+**Answers.** (1) `EXPECT_EQ(extract(0xA0000000U, 28, 4), 0xAU)`. (2) Set `Fake::mem[0] = 0x3000U`, expect `Pa5Mode::read() == 0U`. (3) The range check, `"field must be 1-32 bits"`, because `Width > 0` is false. (4) Exactly two: `FieldWriteLeavesNeighboursAlone` and `FieldWriteOverwritesRatherThanOrsIn`. The others start from a zeroed register, where clearing changes nothing, which is why a test must start from a register that already has bits set. (5) See "Why match the message" above.
+
 # Mistakes and fixes
 
 ## A write that compiled cleanly and did nothing
