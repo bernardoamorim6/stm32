@@ -569,7 +569,78 @@ msr PRIMASK, r1
 
 Every instruction with interrupts masked adds to the worst case latency before any interrupt can be serviced, including SysTick, which `delay_ms` depends on. `tx_start` is one register access between enter and exit for that reason.
 
+# The C++ register layer
+
+## A template writes code for me
+
+The idea that made this click: a template is a recipe the compiler uses to write ordinary code, once for every combination of parameters I use. `Field<GpioaModer, 10, 2>` effectively becomes:
+
+```c
+const uint32_t Pa5Mode_mask = 0xC00;   /* the compiler ran make_mask(10, 2) */
+uint32_t Pa5Mode_read(void) { return (GpioaModer_read() & 0xC00) >> 10; }
+```
+
+Every template parameter turns into a constant baked into that generated code. Nothing is passed at runtime, which is why it costs nothing.
+
+## Types versus values as parameters
+
+`std::uint32_t Position` is a **value**, a number like 10. `typename Register` is a **type**, a whole thing like `Reg<0x50000000U, Mmio>`. My first `Field::read` took `Register reg` as a function parameter, as if it were a variable holding the register's contents. It is a type, and the way to get a value out of a type with static members is to call one: `Register::read()`.
+
+Related: `.` reaches into an object, `::` reaches into a type or namespace. There are no objects anywhere in this design, so it is always `::`.
+
+## Why a constexpr make_mask and not the C one
+
+C's `static inline` functions run on the chip. Their results can never feed a `static_assert`, because the compiler never runs them. The same arithmetic marked `constexpr` runs inside the compiler. That is the whole mechanism: same logic, evaluated at compile time instead of run time.
+
+## A function argument is never a compile-time constant
+
+Even inside a `constexpr` function, a parameter cannot be checked by `static_assert`. So `write(uint32_t value)` could never reject an out-of-range value. It has to be `write<Value>()`: a member function template, with the value as a template parameter where the compiler can see it.
+
+## reinterpret_cast cannot be constexpr
+
+Turning an integer into a pointer is forbidden in a constant expression, so the register address is a `std::uintptr_t` template parameter and only becomes a pointer inside `Mmio::read` and `Mmio::write`. That draws the line cleanly: mask arithmetic is compile time, register access is run time.
+
+I first wrote the cast C-style, `(volatile std::uint32_t *) address`. Identical code, but in C++ a C-style cast silently becomes whichever of `static_cast`, `const_cast` or `reinterpret_cast` fits, and you do not get to say which. In a layer whose argument is "C++ makes this more explicit", that was the line to fix.
+
+## Defining a member function inside its class makes it inline
+
+That is what lets a header-only library be included from many `.cpp` files without duplicate symbols. The C++ equivalent of `static inline` in `bitops.h`.
+
+## Testing that something does not compile
+
+The two `static_assert`s are the point of the layer, so they need tests. Each "must not compile" case is its own file in `tests/compile_fail/`, built by a CMake target excluded from the normal build. A `ctest` test tries to build it and passes only if the output contains the expected `static_assert` message. Matching the message matters: without it, a typo in the bad file would also fail to compile and the test would pass for the wrong reason. I checked it the same way as the other suites: removing either guard fails exactly its own test.
+
+## The flags, and what function-local statics actually need
+
+`-fno-exceptions -fno-rtti -fno-threadsafe-statics` on C++ sources only, via a CMake generator expression. All three switch off features that need a runtime library, and `-nostdlib` links none.
+
+The plan claimed function-local statics need nothing. I checked: one with a non-constant initialiser needs `__cxa_guard_acquire` and `__cxa_guard_release`, which guard against two threads initialising it at once. They live in the C++ runtime. `-fno-threadsafe-statics` removes them, and with no threads there is nothing to guard.
+
+## .init_array: enforced, not just avoided
+
+`Reset_Handler` copies `.data` and zeroes `.bss`, but does not walk `.init_array`, so a global object with a constructor would compile, link, and never be constructed. I chose not to add that loop: `Reg` and `Field` are never instantiated, so nothing needs it, and startup code nothing exercises is untested code. Instead the linker script collects `.init_array` between two symbols and asserts they are equal. Verified both ways: the firmware links, and one global constructor fails the link with a message naming the cause.
+
+## The measurement
+
+Byte-for-byte identical output for `insert()` with constants and `Field::write<1>()`, 24 bytes each at `-O2`. The C driver is 44 bytes, but that compares a generic function against a constant-folded one, so it is not a fair fight in either direction. Details and the reproducible script are in the README.
+
 # Mistakes and fixes
+
+## A write that compiled cleanly and did nothing
+
+My first `Field::write<Value>()` body was:
+
+```cpp
+Register::read() && ~mask | Position << 10;
+```
+
+Three bugs in one line. `&&` is logical AND, giving 0 or 1, where I needed bitwise `&`. `Position << 10` should have been `Value << Position`: the 10 came from the example, and `Position` already is the position. And the result was computed and thrown away, never passed to `Register::write`.
+
+It compiled with no warning under `-Wall -Wextra`. A discarded expression normally triggers "statement has no effect", but `Register::read()` does a `volatile` read, which counts as a side effect. My compile check proved the types were right; only the tests could prove the behaviour, and every write test failed with the register unchanged.
+
+## -fsyntax-only is satisfied by a promise
+
+I declared `Mmio::read` and `Reg::read` with no bodies and the syntax check passed. A declaration only promises a function exists; the linker is what looks for it. Templates have the same blind spot in a different form: they are only fully checked when instantiated, so an unused `Reg` proves nothing. The fix was checking the header from a small probe that includes it and actually calls it.
 
 ## My lint steps could not fail
 

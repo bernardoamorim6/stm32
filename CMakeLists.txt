@@ -13,6 +13,9 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 add_library(bitops INTERFACE)
 target_include_directories(bitops INTERFACE drivers/include)
 
+add_library(hal INTERFACE)
+target_include_directories(hal INTERFACE hal/include)
+
 # Warnings on everywhere, but only fatal in CI: -Werror in a local
 # edit-compile loop gets in the way more than it helps.
 option(WARNINGS_AS_ERRORS "Treat warnings as errors (CI sets this)" OFF)
@@ -46,6 +49,12 @@ if(CMAKE_CROSSCOMPILING)
   # Reset_Handler as a memset and emits a call to it, which -nostdlib has not
   # linked.
   target_compile_options(firmware PRIVATE -Og -fno-tree-loop-distribute-patterns ${PROJECT_WARNINGS})
+
+  # C++ only. No exception or RTTI runtime is linked (-nostdlib), and with no
+  # threads the guards around function-local statics protect nothing, yet
+  # would need __cxa_guard_acquire/release from the C++ runtime.
+  target_compile_options(firmware PRIVATE
+    $<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions -fno-rtti -fno-threadsafe-statics>)
 
   # -nostdlib drops libgcc along with libc, but libgcc holds the compiler
   # support routines. Cortex-M0+ has no hardware divide instruction, so any
@@ -104,7 +113,17 @@ else()
     GTest::gtest_main
   )
 
-  foreach(t bitops_tests gpio_tests ringbuffer_tests)
+  add_executable(
+    reg_tests
+    tests/reg_tests.cpp
+  )
+  target_link_libraries(
+    reg_tests
+    hal
+    GTest::gtest_main
+  )
+
+  foreach(t bitops_tests gpio_tests ringbuffer_tests reg_tests)
     target_compile_options(${t} PRIVATE ${PROJECT_WARNINGS})
   endforeach()
 
@@ -112,5 +131,20 @@ else()
   gtest_discover_tests(bitops_tests)
   gtest_discover_tests(gpio_tests)
   gtest_discover_tests(ringbuffer_tests)
+  gtest_discover_tests(reg_tests)
+
+  # Compile-time rejection tests. Each source must fail to build, and with the
+  # expected static_assert message, so a typo cannot make one pass by accident.
+  foreach(case value_too_wide:value\ does\ not\ fit\ in\ field
+               field_past_bit_31:field\ must\ be\ 1-32\ bits)
+    string(REPLACE ":" ";" parts "${case}")
+    list(GET parts 0 name)
+    list(GET parts 1 expected)
+    add_executable(compile_fail_${name} EXCLUDE_FROM_ALL tests/compile_fail/${name}.cpp)
+    target_link_libraries(compile_fail_${name} hal)
+    add_test(NAME CompileFail.${name}
+             COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target compile_fail_${name})
+    set_tests_properties(CompileFail.${name} PROPERTIES PASS_REGULAR_EXPRESSION "${expected}")
+  endforeach()
 
 endif()

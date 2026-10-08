@@ -6,12 +6,13 @@ Every register definition, the linker script, the vector table and the reset han
 
 I did use ST's debugger nad flashing tools, I only wanted to use hand written instead of generated code, not refuse vendor tooling.
 
-**If you only read four things:**
+**If you only read five things:**
 
 - [Trimming the internal oscillator](#trimming-it-out) from +0.5% to -0.06% error, and working out where the granularity floor is rather than stopping when it looked good enough
 - [One UART bit measured at 8.625 µs](#the-independent-measurement) against 8.667 predicted, with an honest note on why the analyser cannot resolve the difference
 - [An interrupt handler that was 2.3x over its time budget](#measured-the-isr-was-too-slow-before-it-was-wrong), found by counting instructions against the 86.8 µs byte time rather than guessing at a race
 - [A test suite checked against deliberately broken code](#testing-a-driver-without-hardware), because passing tests only prove the tests run
+- [A C++ register template that compiles to the same bytes as the C](#the-c17-layer-checked-at-compile-time-free-at-run-time), while rejecting out-of-range writes at compile time
 
 ---
 
@@ -43,6 +44,8 @@ This is a work in progress. What follows is what actually runs and is tested, no
 
 **Ring buffer** (`drivers/src/ringbuffer.c`) A fixed 64-byte FIFO with no allocation, written for the interrupt-driven UART that comes next: an ISR drops bytes in and returns, `main` takes them out whenever it gets there. Indices wrap with `& (RBSIZE - 1)` rather than a modulo, because Cortex-M0+ has no divide instruction. One slot is left unused so that `head == tail` can only ever mean empty, which makes the single-producer, single-consumer case correct with no critical sections: the producer writes only `head`, the consumer writes only `tail`, and neither needs to disable interrupts. The alternative, a shared occupancy count, is written by both sides and would need one. Capacity is therefore 63 bytes, which several tests assert directly. Covered by 13 host tests.
 
+**C++17 register layer** (`hal/include/reg.hpp`) A field's register, position and width are template parameters, so writing a value that does not fit, or declaring a field that runs past bit 31, fails to compile. Byte-for-byte identical machine code to the equivalent C. Covered by 10 host tests and 2 compile-time rejection tests. See [below](#the-c17-layer-checked-at-compile-time-free-at-run-time).
+
 **Clock tree** The reset clock path is documented end to end in
 [`docs/NOTES.md`](docs/NOTES.md): HSI48 (48 MHz) -> `HSIDIV` ÷4 -> HSISYS -> `SW` mux ->
 `SYSDIV` ÷1 -> SYSCLK -> `HPRE` ÷1 -> HCLK = **12 MHz** at the core, with the controlling register field and bit range for each stage. Verified by reading `RCC_CR` off the chip at the reset halt, and by deliberately changing `HSIDIV` to ÷8 and observing the blink rate halve.
@@ -61,9 +64,9 @@ The scope below is the plan, not a promise, it gets revised as I go, and this se
 
 **Partially converted to the register-struct convention.** GPIO now follows it: `stm32c031_regs.h` defines the port as a struct, and every driver function takes a pointer to one. Firmware passes the hardware address, tests pass a struct in RAM. RCC and SysTick still poke fixed addresses directly and will be converted as those drivers are written.
 
-**C++17 layer** (`hal/`, empty until the C drivers exist). It exists to answer one question: can modern C++ make register access safer than the C layer at zero cost? Type-safe registers via templates where an illegal write fails at compile time, RAII for I²C transactions so a stop can never be missed on an early return, `-fno-exceptions -fno-rtti`, `std::span` over the C layer's buffers, `enum class` for modes and errors.
+**Rest of the C++17 layer.** The register template exists. Still to come, alongside the I²C driver: RAII for I²C transactions so a stop can never be missed on an early return, `std::span` over the C layer's buffers, and `enum class` writes for values only known at runtime.
 
-**The measurement.** The same I²C register read performed two ways, through the C driver directly and through the C++ wrapper, comparing `.text` size and cycle counts against a stripped baseline. Table to follow here.
+**The full measurement.** The same I²C register read through the C driver and through the C++ wrapper, comparing `.text` and cycle counts against the stripped baseline. An early GPIO data point is [below](#the-c17-layer-checked-at-compile-time-free-at-run-time).
 
 **Deferred until after the October gate:** timer/PWM output and ADC (internal temperature sensor and VREFINT).
 
@@ -239,6 +242,48 @@ The script reports when the first and last bytes arrived and prints an explicit 
 
 ---
 
+## The C++17 layer: checked at compile time, free at run time
+
+`hal/include/reg.hpp` describes a register field as a type:
+
+```cpp
+using GpioaModer = hal::Reg<0x50000000U, hal::Mmio>;
+using Pa5Mode    = hal::Field<GpioaModer, 10, 2>;   // MODER bits 11:10
+
+Pa5Mode::write<1>();   // PA5 to output
+Pa5Mode::write<4>();   // error: value does not fit in field
+```
+
+### Why it needs its own mask arithmetic
+
+The C drivers already have `make_mask` in `bitops.h`. The C++ layer cannot reuse it. A C `static inline` function runs on the chip, so its result can never feed a `static_assert`. The same arithmetic marked `constexpr` runs inside the compiler, which is where every check in this layer happens. Same logic, evaluated at a different time, and that difference is the entire reason the layer exists.
+
+It also catches something the C cannot. `make_mask(31, 2)` silently returns `0x80000000` in both languages: the top bit of the field shifts off the register. In C there is no way to detect it. Here `Field<R, 31, 2>` fails to compile, because position and width are template parameters a `static_assert` can see.
+
+The checks are in the test suite, not just in the header. Two sources under `tests/compile_fail/` must fail to build, and `ctest` passes only if they fail **with the expected message**, so one that fails for an unrelated reason does not count. Removing either guard fails exactly its own test.
+
+### What it costs
+
+The same operation three ways, PA5 to output at `-O2` ([`bench/gpio_mode/run.sh`](bench/gpio_mode/run.sh)):
+
+| | Bytes |
+|---|---|
+| C driver, `gpio_set_mode(GPIOA, 5, ...)` | 44 (16 call site + 28 function) |
+| C with constants, `insert()` on `GPIOA->MODER` | 24 |
+| C++ template, `Pa5Mode::write<1>()` | 24 |
+
+The last two are byte-for-byte identical, and the script exits non-zero if that ever stops being true. `Reg`, `Field`, both `static_assert`s and two levels of templates leave nothing behind: `~mask` and `Value << Position` appear in the output as the constants `0xFFFFF3FF` and `0x400`.
+
+The template beating the C driver is not a C++ win and I would not claim it as one. `gpio_set_mode` is generic, so it computes the shift on the chip and is called. The template inlines about 24 bytes at every use; the C driver costs about 12 per call plus its body once. Past a handful of call sites the shared C function is smaller. The fair claim is the second comparison: the abstraction is free.
+
+### Build constraints, and why
+
+C++ sources in the firmware build with `-fno-exceptions -fno-rtti -fno-threadsafe-statics`. All three remove features that need a runtime library, and this project deliberately links none (`-nostdlib`). The third is less well known: a function-local static with a non-constant initialiser calls `__cxa_guard_acquire`, which protects against two threads initialising it at once, and with no threads it protects nothing.
+
+`Reset_Handler` does not walk `.init_array`, so a global object with a constructor would compile, link, and silently never be constructed. Rather than add startup code nothing uses, the linker script asserts the section is empty, so a global constructor is a link error that names the cause. `Reg` and `Field` are types with only static members and are never constructed, so the design never needs it.
+
+---
+
 ## Hardware and toolchain
 
 | | |
@@ -255,7 +300,7 @@ Current firmware size:
 
 ```
    text    data     bss     dec     hex
-   1464       0     148    1612     64c
+   1440       0     148    1588     634
 ```
 
 ---
@@ -302,9 +347,9 @@ What this should show, and why it matters:
 
 ```
 0 .isr_vector   000000c0  08000000  08000000
-1 .text         000004f8  080000c0  080000c0
-2 .data         00000000  20000000  080005b8
-3 .bss          00000094  20000000  080005b8
+1 .text         000004e0  080000c0  080000c0
+2 .data         00000000  20000000  080005a0
+3 .bss          00000094  20000000  080005a0
 ```
 
 `.isr_vector` sits at `0x08000000`: the vector table has to be the first thing in Flash or the core can't find the initial stack pointer and reset vector on boot.
@@ -321,7 +366,8 @@ What this should show, and why it matters:
 app/                 application entry point
 drivers/include/     C headers (bitops.h, stm32c031_regs.h, gpio.h, systick.h, usart.h, ringbuffer.h, critical.h)
 drivers/src/         C sources (startup.c, systick.c, gpio.c, usart.c, ringbuffer.c)
-hal/                 C++17 layer (empty until the C drivers exist)
+hal/include/         C++17 register layer (reg.hpp)
+bench/               reproducible size comparisons (bench/gpio_mode/run.sh)
 tests/               GoogleTest suites, host-only
 linker/              linker script
 cmake/               ARM toolchain file
@@ -336,7 +382,7 @@ docs/                NOTES.md, the working log (reference PDFs are gitignored)
 
 ## Testing a driver without hardware
 
-58 GoogleTest cases run on the host, with no board attached. That is possible because no driver function knows its own address:
+68 GoogleTest cases and 2 compile-time rejection tests run on the host, with no board attached. That is possible because no driver function knows its own address:
 
 ```c
 void gpio_set_mode(GPIO_Regs *port, uint32_t pin, gpio_mode_t mode);

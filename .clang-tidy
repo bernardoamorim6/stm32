@@ -13,7 +13,7 @@ Checks: >
 # cognitive-complexity:   inflated by GoogleTest macro expansion, never fires on drivers.
 # easily-swappable:       true of gpio_write(port, pin, value); the C++ layer fixes it in types.
 
-HeaderFilterRegex: 'drivers/include/.*'
+HeaderFilterRegex: '(drivers|hal)/include/.*'
 
 CheckOptions:
   # Linker script symbols. The leading underscore is the toolchain convention.

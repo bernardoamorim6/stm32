@@ -27,6 +27,18 @@ SECTIONS
     _etext = .;
   }> FLASH
 
+/* Reset_Handler does not walk .init_array, so a global object with a
+   constructor would silently never be constructed. Fail the link instead. */
+.init_array :
+  {
+    __init_array_start = .;
+    KEEP(*(.init_array*))
+    __init_array_end = .;
+  }> FLASH
+
+ASSERT(__init_array_end == __init_array_start,
+       "global object with a constructor: Reset_Handler does not run .init_array")
+
 _la_data = LOADADDR(.data);
   .data :
   {
