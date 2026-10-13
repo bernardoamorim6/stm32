@@ -163,9 +163,8 @@ HSI48 oscillator. The HSI48 clock signal is generated from an internal 48 MHz RC
 ```
 HSI48 48 MHz
   └─ HSIDIV  [CR 13:11]   ÷4  → HSISYS 12 MHz
-      └─ SW  [CFGR 2:0]   selects HSISYS
-          └─ SYSDIV [CR 4:2]   ÷1  → SYSCLK 12 MHz
-              └─ HPRE [CFGR 11:8] ÷1 → HCLK 12 MHz ← core
+      └─ SW  [CFGR 2:0]   selects HSISYS  → SYSCLK 12 MHz
+          └─ HPRE [CFGR 11:8] ÷1 → HCLK 12 MHz ← core
 ```
 
 ## The register fields that control all of it
@@ -186,7 +185,7 @@ Only the fields in the oscillator-to-core path are listed. The other ~20 RCC reg
 
 ## The clock path, end to end
 
-HSI48 RC 48 MHz clock osurce, to the RCC_CR HSIDIV[2:0] = 010 box, output labelled HSISYS. That box is HSIDIV, at reset ÷4, so 12 MHz. This goes into the mux (RCC_CFGR SW[2:0] = 000) in the middle. That's SW, at reset selecting HSISYS. IT then goes to SYSDIV(3)(SYSDIV(3)	RCC_CR SYSDIV[2:0] = 000) output labelled SYSCLK, at reset ÷1, still 12 MHz.It then goes to AHB PRESC (AHB PRESC	RCC_CFGR HPRE[3:0] = 0xxx) with output HCLK, at reset ÷1, still 12 MHz. Finally it goes to core
+HSI48 RC 48 MHz clock source, to the RCC_CR HSIDIV[2:0] = 010 box, output labelled HSISYS. That box is HSIDIV, at reset ÷4, so 12 MHz. This goes into the mux (RCC_CFGR SW[2:0] = 000) in the middle. That's SW, at reset selecting HSISYS. Its output is SYSCLK, still 12 MHz. The clock tree also draws a SYSDIV divider here, but RM0490 only has it on the C051/C071/C091/C092, so the C031 has none. It then goes to AHB PRESC (AHB PRESC	RCC_CFGR HPRE[3:0] = 0xxx) with output HCLK, at reset ÷1, still 12 MHz. Finally it goes to core
 
 ## Changing it deliberately
 
@@ -624,6 +623,63 @@ The plan claimed function-local statics need nothing. I checked: one with a non-
 
 Byte-for-byte identical output for `insert()` with constants and `Field::write<1>()`, 24 bytes each at `-O2`. The C driver is 44 bytes, but that compares a generic function against a constant-folded one, so it is not a fair fight in either direction. Details and the reproducible script are in the README.
 
+
+# I2C Implementation
+
+## I2C Registers from RM0490
+
+The registers are on page 728. 
+Base Address: 0x40005400
+
+### CR2 
+
+- offset: 0x04
+- Reset value: 0x00000000
+- Slave address: SADD[9:0]; in 7 bit addressing mode (ADD10 = 0, default) SADD[7:1] written with the 7 bit target address to be sent. Bits SADD[9], SADD[8] and SADD[0] are don't care.
+- Direction: Bit 10, RD_WRN 
+    -> 0: Controller Requests write transfer
+    -> 1: Controller requests read transfer
+- NBYTES[7:0] Bits [23:16]: Number of bytes to be transmitted
+- START - bit 13: Set by software. CLeared by hardware after START condition followed by the address sequyence i sent, by an arbitration loss, by an address matched in target mode, by a timeout error detection or when  PE = 0;
+    -> 0: No START generation
+    -> 1: RESTART/START generation
+If the I2C is already in controller mode with AUTOEND = 0, setting this bit generates a repeated START condition when RELOAD=0, after the end of the NBYTES transfer. Otherwise, setting this bit generates a START condition once the bus is free.
+Note: Writing 0 to this bit has no effect. The START bit can be set even if the bus is BUSY or I2C is in target mode. This bit has no effect when RELOAD is set.
+- STOP - bit 14: Only pertains to controller mode. It is set by software and cleared by hardware whena stop condition is detected or when PE=0. 
+    -> 0: No STOP generation
+    -> 1: STOP generation after current byte transfer
+- AUTOEND - bit 25: Set and cleared by software.    
+    -> 0: Software end mode; TC flag is set when NBYTES data are transferred, stretching SCL low.
+    -> 1: Automatic end mode: a STOP condition is automatically sent when NBYTES data are transferred
+
+
+### ISR
+
+- offset: 0x18
+- Reset value: 0x00000001
+- Send next byte TXIS (Transmit interrupt status) - bit 1: Set by hardware when the I2C_TXDR register is empty and the data to be transmitted must be written to I2C_TXDR register. Cleared when the next data to be sent is written in the I2C_TXDR register. Bit can be wrritten to 1 by software only when NOSTRETCH=1, to generate a TXIS event (interrupt if TXIE = 1 or DMA request if TXDMAEN=1) (cleared by hardware when PE = 0)
+- Byte arrived RXNE (Receive data register not empty) - bit 2: This bit is set when the received data is copied into teh I2C_RXDR register and is ready to be read. It is cleared when the I2C_RXDR is read (cleared by hardware when PE = 0) 
+- Transfer Complete (TC) - Bit 6: Flag set by hardware when RELOAD = 0, AUTOEND = 0 and NBYTES data have been transferred. Cleared by software when START bit or STOP bit is set. (cleared by hardware when PE = 0)
+- NACKF - Bit 4: Not acknowledge received flag, set by hardware when a NACK is received after a byte transmition. Cleared by software by writing NACKCF in ICR. (cleared by hardware when PE = 0)
+- STOPF - bit 5: Flag set by hardware when a STOP condition is detected on teh b us and the peripheral is involved in this transfer:
+    - as a controller (master), provided that the STOP condition is generated by the peripheral
+    - as a target (slave), provided that the peripheral has been addressed previously during this transfer
+Cleared by software by setting the STOPCF bit (cleared by hardware when PE = 0)
+- BUSY - bit 15: Bus busy. This flag indicates that a communication is in progress on teh bus. Set by hardware when a START condition is detected, cleared by hardware when a STOP condition is detected or when PE = 0;
+
+
+**How each flag clears:**
+
+| Flag | Bit | Cleared by |
+|---|---|---|
+| `TXIS` | 1 | writing the next byte to `TXDR` |
+| `RXNE` | 2 | reading `RXDR` |
+| `NACKF` | 4 | writing `NACKCF` in `ICR` |
+| `STOPF` | 5 | writing `STOPCF` in `ICR` |
+| `TC` | 6 | software setting `START` or `STOP` in `CR2` |
+| `BUSY` | 15 | hardware, when it sees a STOP |
+
+
 # How the tests work, for studying
 
 ## Why the test files are C++ when the code is C
@@ -724,6 +780,46 @@ endfunction()
 ## Testing the tests
 
 A test that has never failed has not shown it can. So for every suite I broke the code on purpose and checked that the right tests failed, and only those: swapped `BSRR` halves for GPIO, four ring buffer bugs, both compile-time guards removed one at a time.
+
+## Testing a state machine: the I²C tests
+
+`tests/i2c_tests.cpp` uses everything above, plus five ideas the earlier suites did not need.
+
+**1. The test plays the hardware.** In the GPIO tests the driver wrote a register and the test read it back. That is not enough here, because real hardware changes flags by itself and a struct in RAM never does: writing `TXDR` does not clear `TXIS`, writing `ICR` clears nothing. So before every step the test sets `ISR` to what the peripheral would be reporting at that moment:
+
+```cpp
+i2c_state_t step(uint32_t isr, uint32_t now = 0) {
+    fake.ISR = isr;
+    return i2c_step(&fake, &x, now);
+}
+```
+
+A test then reads like a script of the bus: `step(0)` sends the address, `step(TXIS)` says the peripheral is ready for a byte, `step(TC)` says the byte went out.
+
+**2. Helpers that drive to a state.** To test what happens in `WAIT_RXNE`, the test first has to get there. Setting `x.state` directly would skip the setup the earlier states do, like writing `CR2`. So the fixture replays the real path:
+
+```cpp
+void to_wait_rxne() { to_wait_tc(); step(TC); }
+```
+
+Each helper builds on the previous one, so every test that reaches a deep state also re-checks the path to it.
+
+**3. Independent constants.** The test defines `TXIS = 1U << 1` and the rest itself, from RM0490, instead of using `I2C_ISR_TXIS` from `i2c.h`. If the header had a wrong bit position and the test used the same wrong value, the test would pass and the hardware would fail. Same reason the expected `CR2` values are hex worked out by hand rather than built with `insert()`.
+
+**4. Time is an input, so time can be tested.** `i2c_step` takes `now_ms` instead of reading the tick counter. That allows three tests that would be impossible against a real clock: exactly at the budget is not a timeout, one past it is, and the timeout still works when the 32-bit counter wraps from `0xFFFFFFFF` to `0`. That last one passes because the comparison uses unsigned subtraction, the same trick as `delay_ms`.
+
+**5. Testing order and absence.** Some tests check which rule wins when two things are true at once: a bus error beats the flag being waited for, a flag that has arrived beats the timeout. Others check that something did **not** happen: after a NACK, `ICR` must still be zero, because nothing should be cleared before the STOP completes. Asserting absence is how you catch an implementation that does the right thing too early.
+
+**How I checked the tests themselves:** against a do-nothing stub, 22 of 25 fail, which proves they can fail. Against a separate reference implementation kept outside the repo, all 25 pass, which proves they can be satisfied and do not contradict each other. A suite that has only ever been green, or only ever red, has not shown either.
+
+### Exercises
+
+1. Explain why `WaitingForTxisDoesNothingUntilItArrives` checks `TXDR` as well as the returned state.
+2. `TerminalStatesWriteNothing` passes against the do-nothing stub. Why is that fine, and which tests make sure the stub is not mistaken for a working driver?
+3. Write a test that a NACK during `WAIT_STOPF` after a *successful* read does not turn `DONE` into an error. What should `ISR` contain?
+4. Write a test for a two-byte burst where the deadline passes between the first and second byte. Which state should it fail in?
+
+**Answers.** (1) A state machine can return the right state while still having acted, here by writing a byte early; the register check catches that. (2) Doing nothing is the correct behaviour for a terminal state; every happy-path and error test fails against the stub. (3) After a successful read the hardware sends no NACK, but if `NACKF` were set while in `WAIT_STOPF`, `ISR = NACKF | STOPF` should still end in `DONE`, because `end_state` was never changed. (4) In `WAIT_RXNE`: step the first `RXNE` at an early time, then a step with no flags at a time past the budget should return `I2C_ERR_TIMEOUT`.
 
 ## Exercises
 
@@ -880,13 +976,13 @@ Bits 6, 8, 10 and 12 are set, which decodes as:
 
 | Bit(s) | Field | Value | Meaning |
 |---|---|---|---|
-| 4:2 | `SYSDIV[2:0]` = `000` | ÷1 | system clock divider |
+| 4:2 | reserved | | `SYSDIV` in the SVD, but RM0490 only has it on the C051/C071/C091/C092 |
 | 6 | `HSIKERDIV[2:0]` = `010` | ÷3 | kernel clock divider |
 | 8 | `HSION` | 1 | HSI48 enabled |
 | 10 | `HSIRDY` | 1 | HSI48 stable |
 | 12 | `HSIDIV[2:0]` = `010` | ÷4 | HSI48 → HSISYS = 12 MHz |
 
-Every field matches RM0490, including *both* fields the revision history names. So the SVD is wrong on two counts, not one.
+Every field matches RM0490, including *both* fields the revision history names. So the SVD is wrong on two counts, not one, three if you count the `SYSDIV` field it gives a part that does not have it.
 
 Takeaway: the SVD stays useful for register layout: addresses, offsets, bit positions, which is what the peripheral viewer needs; but it is a generated artifact. Where it disagrees with the reference manual, the manual wins; and where it matters, I read the register off the chip and settle it.
 

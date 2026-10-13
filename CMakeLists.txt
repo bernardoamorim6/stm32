@@ -34,6 +34,7 @@ if(CMAKE_CROSSCOMPILING)
     drivers/src/gpio.c
     drivers/src/usart.c
     drivers/src/ringbuffer.c
+    drivers/src/i2c.c
   )
   set_target_properties(firmware PROPERTIES SUFFIX ".elf")
 
@@ -123,7 +124,18 @@ else()
     GTest::gtest_main
   )
 
-  foreach(t bitops_tests gpio_tests ringbuffer_tests reg_tests)
+  add_executable(
+    i2c_tests
+    tests/i2c_tests.cpp
+    drivers/src/i2c.c
+  )
+  target_link_libraries(
+    i2c_tests
+    bitops
+    GTest::gtest_main
+  )
+
+  foreach(t bitops_tests gpio_tests ringbuffer_tests reg_tests i2c_tests)
     target_compile_options(${t} PRIVATE ${PROJECT_WARNINGS})
   endforeach()
 
@@ -132,6 +144,7 @@ else()
   gtest_discover_tests(gpio_tests)
   gtest_discover_tests(ringbuffer_tests)
   gtest_discover_tests(reg_tests)
+  gtest_discover_tests(i2c_tests)
 
   # A test that passes only if the source FAILS to compile, and with the
   # expected static_assert message, so a typo cannot make it pass by accident.

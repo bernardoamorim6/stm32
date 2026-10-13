@@ -12,6 +12,7 @@ extern "C" {
 #define GPIOA_BASE_ADDR 0x50000000U
 #define GPIOC_BASE_ADDR 0x50000800U
 #define USART2_BASE_ADDR 0x40004400U
+#define I2C1_BASE_ADDR 0x40005400U
 
 
 typedef struct {
@@ -84,6 +85,38 @@ static_assert(sizeof(USART_Regs)          == 0x30, "USART_Regs: total size");
 
 /* Define the USART2 struct */
 #define USART2 ((USART_Regs *)(USART2_BASE_ADDR))
+
+typedef struct {
+    uint32_t volatile CR1;          /*!< I2C control register 1,                Address offset: 0x00        */
+    uint32_t volatile CR2;          /*!< I2C control register 2,                Address offset: 0x04        */
+    uint32_t volatile OAR1;         /*!< I2C own address 1 register,            Address offset: 0x08        */
+    uint32_t volatile OAR2;         /*!< I2C own address 2 register,            Address offset: 0x0C        */
+    uint32_t volatile TIMINGR;      /*!< I2C timing register,                   Address offset: 0x10        */
+    uint32_t volatile TIMEOUTR;     /*!< I2C timeout register,                  Address offset: 0x14        */
+    uint32_t volatile ISR;          /*!< I2C interrupt and status register,     Address offset: 0x18        */
+    uint32_t volatile ICR;          /*!< I2C interrupt clear register,          Address offset: 0x1C        */
+    uint32_t volatile PECR;         /*!< I2C PEC register,                      Address offset: 0x20        */
+    uint32_t volatile RXDR;         /*!< I2C receive data register,             Address offset: 0x24        */
+    uint32_t volatile TXDR;         /*!< I2C transmit data register,             Address offset: 0x28        */
+} I2C_Regs;
+
+/* Same reasoning as GPIO_Regs above. Offsets are from RM0490's I2C register
+   map, which runs 0x00 to 0x28 with no gaps, so this struct needs no padding. */
+static_assert(offsetof(I2C_Regs, CR1)       == 0x00, "I2C_Regs: CR1 offset");
+static_assert(offsetof(I2C_Regs, CR2)       == 0x04, "I2C_Regs: CR2 offset");
+static_assert(offsetof(I2C_Regs, OAR1)      == 0x08, "I2C_Regs: OAR1 offset");
+static_assert(offsetof(I2C_Regs, OAR2)      == 0x0C, "I2C_Regs: OAR2 offset");
+static_assert(offsetof(I2C_Regs, TIMINGR)   == 0x10, "I2C_Regs: TIMINGR offset");
+static_assert(offsetof(I2C_Regs, TIMEOUTR)  == 0x14, "I2C_Regs: TIMEOUTR offset");
+static_assert(offsetof(I2C_Regs, ISR)       == 0x18, "I2C_Regs: ISR offset");
+static_assert(offsetof(I2C_Regs, ICR)       == 0x1C, "I2C_Regs: ICR offset");
+static_assert(offsetof(I2C_Regs, PECR)      == 0x20, "I2C_Regs: PECR offset");
+static_assert(offsetof(I2C_Regs, RXDR)      == 0x24, "I2C_Regs: RXDR offset");
+static_assert(offsetof(I2C_Regs, TXDR)      == 0x28, "I2C_Regs: TXDR offset");
+static_assert(sizeof(I2C_Regs)              == 0x2C, "I2C_Regs: total size");
+
+/* Define the I2C1 struct */
+#define I2C1 ((I2C_Regs *)(I2C1_BASE_ADDR))
 
 
 #ifdef __cplusplus

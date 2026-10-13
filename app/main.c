@@ -19,7 +19,10 @@ static void clock_init(void){
     *RCC_IOPENR |= 0b101;
 
     uint32_t volatile *RCC_APBENR1 = (uint32_t volatile *)(0x40021000+0x3c);
-    *RCC_APBENR1 |= make_mask(17, 1);
+    *RCC_APBENR1 |= make_mask(17, 1) | make_mask(21, 1); /* USART2EN | I2C1EN */
+
+    uint32_t volatile *RCC_CCIPR = (uint32_t volatile *)(0x40021000+0x54);
+    *RCC_CCIPR = insert(*RCC_CCIPR, 0b10, 12, 2);
 }
 
 int main(void) {
