@@ -26,6 +26,16 @@ static void clock_init(void){
     *RCC_CCIPR = insert(*RCC_CCIPR, 0b10, 12, 2);
 }
 
+static void print_hex(uint8_t value) {
+    /* send "0x", then the high nibble, then the low nibble, as characters */
+    char low_nibble = "0123456789ABCDEF"[value & 0xF];
+    char high_nibble = "0123456789ABCDEF"[value >> 4];
+    uart_write_byte(USART2, '0');
+    uart_write_byte(USART2, 'x');
+    uart_write_byte(USART2, high_nibble);
+    uart_write_byte(USART2, low_nibble);
+}
+
 int main(void) {
     /* Initialize the clock */
     clock_init();
@@ -63,9 +73,21 @@ int main(void) {
     uart_init(USART2, 12000000, 115200);
     uart_write_string(USART2, "echo ready\r\n");
     i2c_init(I2C1);
-    uint8_t id = 0;
-    i2c_state_t st = i2c_read_reg(I2C1, 0x76, 0xD0, &id, 1);
-    uart_write_byte(USART2, '0' + st);
+    uart_write_string(USART2, "scanning\r\n");
+    for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
+        uint8_t b;
+        i2c_state_t st = i2c_read_reg(I2C1, addr, 0x00, &b, 1);
+        if (st == I2C_DONE) {
+            print_hex(addr);
+            uart_write_string(USART2, "\r\n");
+        } else if (st != I2C_ERR_NACK_ADDR) {
+            print_hex(addr);
+            uart_write_string(USART2, " err ");
+            uart_write_byte(USART2, '0' + st);
+            uart_write_string(USART2, "\r\n");
+        }
+    }
+    uart_write_string(USART2, "scan done\r\n");
 
     while (1) {
         // *GPIOA_ODR = insert(*GPIOA_ODR, 1, 5, 1);
@@ -75,12 +97,10 @@ int main(void) {
         /* Echo: whatever the ISR dropped into the RX ring goes back
            out through the TX ring. Neither call blocks on the wire, so
            button stays responsive. */
-        // uint8_t byte;
-        // if (uart_read_byte(&byte)) {
-        //     uart_write_byte(USART2, byte);
-        // }
-        
-
+        uint8_t byte;
+        if (uart_read_byte(&byte)) {
+            uart_write_byte(USART2, byte);
+        }
 
         if (gpio_read(GPIOC, 13) == 0) {
             gpio_write(GPIOA, 5, 1);
