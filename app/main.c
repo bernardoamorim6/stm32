@@ -17,7 +17,7 @@ static void clock_init(void){
     *RCC_ICSCR = insert(*RCC_ICSCR, 62, 8, 7);
 
     uint32_t volatile *RCC_IOPENR = (uint32_t volatile *)(0x40021000+0x34);
-    *RCC_IOPENR |= 0b101;
+    *RCC_IOPENR |= 0b111;
 
     uint32_t volatile *RCC_APBENR1 = (uint32_t volatile *)(0x40021000+0x3c);
     *RCC_APBENR1 |= make_mask(17, 1) | make_mask(21, 1); /* USART2EN | I2C1EN */
@@ -44,6 +44,16 @@ int main(void) {
     gpio_set_af(GPIOA, 2, GPIO_AFR_AF1);
     gpio_set_af(GPIOA, 3, GPIO_AFR_AF1);
 
+    gpio_set_otype(GPIOB, 8, GPIO_TYPE_OPEN_DRAIN);
+    gpio_set_otype(GPIOB, 9, GPIO_TYPE_OPEN_DRAIN);
+    gpio_set_pull(GPIOB, 8, GPIO_PUPD_PU);
+    gpio_set_pull(GPIOB, 9, GPIO_PUPD_PU);
+    gpio_set_af(GPIOB, 8, GPIO_AFR_AF6);
+    gpio_set_af(GPIOB, 9, GPIO_AFR_AF6);
+    gpio_set_mode(GPIOB, 8, GPIO_MODE_ALTERNATE);
+    gpio_set_mode(GPIOB, 9, GPIO_MODE_ALTERNATE);
+
+
     uint32_t volatile *NVIC_ISER = (uint32_t volatile *)0xE000E100;
     *NVIC_ISER = make_mask(28, 1);
 
@@ -65,10 +75,12 @@ int main(void) {
         /* Echo: whatever the ISR dropped into the RX ring goes back
            out through the TX ring. Neither call blocks on the wire, so
            button stays responsive. */
-        uint8_t byte;
-        if (uart_read_byte(&byte)) {
-            uart_write_byte(USART2, byte);
-        }
+        // uint8_t byte;
+        // if (uart_read_byte(&byte)) {
+        //     uart_write_byte(USART2, byte);
+        // }
+        
+
 
         if (gpio_read(GPIOC, 13) == 0) {
             gpio_write(GPIOA, 5, 1);

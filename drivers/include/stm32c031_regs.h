@@ -10,6 +10,7 @@ extern "C" {
 #endif
 
 #define GPIOA_BASE_ADDR 0x50000000U
+#define GPIOB_BASE_ADDR 0x50000400U
 #define GPIOC_BASE_ADDR 0x50000800U
 #define USART2_BASE_ADDR 0x40004400U
 #define I2C1_BASE_ADDR 0x40005400U
@@ -46,6 +47,7 @@ static_assert(sizeof(GPIO_Regs)            == 0x2C, "GPIO_Regs: total size");
 
 /* Define GPIOA and GPIOC Structs */
 #define GPIOA ((GPIO_Regs *)(GPIOA_BASE_ADDR))
+#define GPIOB ((GPIO_Regs *)(GPIOB_BASE_ADDR))
 #define GPIOC ((GPIO_Regs *)(GPIOC_BASE_ADDR))
 
 
