@@ -248,6 +248,44 @@ The script reports when the first and last bytes arrived and prints an explicit 
 
 ---
 
+## The I²C state machine
+
+One register read is three phases on the wire: write the register number, a repeated START, then read. `i2c_step` walks that sequence one flag at a time and never waits:
+
+```mermaid
+stateDiagram-v2
+    [*] --> START_WRITE
+    START_WRITE --> WAIT_TXIS : write CR2 (addr << 1, write, NBYTES=1, AUTOEND=0, START)
+
+    WAIT_TXIS --> WAIT_TC : TXIS / write register number to TXDR
+    WAIT_TXIS --> WAIT_STOPF : NACKF / error = NACK_ADDR
+
+    WAIT_TC --> WAIT_RXNE : TC / write CR2 (addr << 1, read, NBYTES=n, AUTOEND=1, START)
+    WAIT_TC --> WAIT_STOPF : NACKF / error = NACK_DATA
+
+    WAIT_RXNE --> WAIT_RXNE : RXNE, more to come / read RXDR into buffer
+    WAIT_RXNE --> WAIT_STOPF : RXNE, last byte / read RXDR into buffer
+    WAIT_RXNE --> WAIT_STOPF : NACKF / error = NACK_ADDR
+
+    WAIT_STOPF --> DONE : STOPF, no error / clear STOPF and NACKF
+    WAIT_STOPF --> ERR_NACK_ADDR : STOPF, error NACK_ADDR / clear STOPF and NACKF
+    WAIT_STOPF --> ERR_NACK_DATA : STOPF, error NACK_DATA / clear STOPF and NACKF
+
+    note right of WAIT_STOPF : From every WAIT_ state, BERR or ARLO goes to ERR_BUS and a passed deadline goes to ERR_TIMEOUT
+
+    DONE --> [*]
+    ERR_NACK_ADDR --> [*]
+    ERR_NACK_DATA --> [*]
+    ERR_BUS --> [*]
+    ERR_TIMEOUT --> [*]
+```
+
+Three decisions behind it:
+
+- **A NACK goes through `WAIT_STOPF`, not straight to an error.** After a NACK the peripheral sends STOP by itself, and returning before it finishes would let the next transfer start on a bus that is still busy. The error is remembered in the transfer's `end_state`, so the same state finishes both the success path and both NACK paths.
+- **The first write phase uses `AUTOEND=0`.** That makes the peripheral raise `TC` instead of sending STOP, which is what allows the repeated START into the read. The read phase uses `AUTOEND=1`, so the final STOP comes from hardware.
+- **Time is an input.** `i2c_step` takes `now_ms` rather than reading the tick itself, so every timeout path, including the 32-bit tick wrap, is tested on the host without waiting.
+
 ## The C++17 layer: checked at compile time, free at run time
 
 `hal/include/reg.hpp` describes a register field as a type:
