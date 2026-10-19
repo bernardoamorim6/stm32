@@ -32,3 +32,7 @@ void delay_ms(uint32_t delay){
     uint32_t start = counter;
     while (counter - start < delay) { }
 }
+
+uint32_t systick_now(void){
+    return counter;
+}

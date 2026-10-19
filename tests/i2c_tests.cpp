@@ -44,9 +44,13 @@ protected:
         i2c_xfer_begin(&x, 0x76, 0xD0, buf, len, now, timeout);
     }
 
+    /* Also checks the returned state was stored: callers loop on x.state, so a
+       state that is only returned never ends the loop. */
     i2c_state_t step(uint32_t isr, uint32_t now = 0) {
         fake.ISR = isr;
-        return i2c_step(&fake, &x, now);
+        const i2c_state_t s = i2c_step(&fake, &x, now);
+        EXPECT_EQ(s, x.state) << "returned a state without storing it";
+        return s;
     }
 
     // Drive a fresh one-byte read to a given wait state, playing the hardware.
@@ -227,6 +231,18 @@ TEST_F(I2cStep, EveryWaitStateCanTimeOut) {
 TEST_F(I2cStep, AFlagThatHasArrivedBeatsTheTimeout) {
     to_wait_txis();
     EXPECT_EQ(step(TXIS, 50), I2C_WAIT_TC);
+}
+
+TEST_F(I2cStep, ALateStopStillFinishesAsDone) {
+    to_wait_stopf();
+    EXPECT_EQ(step(STOPF, 50), I2C_DONE);
+}
+
+TEST_F(I2cStep, ATimeoutIsFinal) {
+    to_wait_txis();
+    step(0, 11);
+    EXPECT_EQ(step(TXIS, 12), I2C_ERR_TIMEOUT);
+    EXPECT_EQ(fake.TXDR, 0U) << "nothing should go out after giving up";
 }
 
 TEST_F(I2cStep, TimeoutSurvivesTheTickCounterWrapping) {

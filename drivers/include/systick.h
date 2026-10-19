@@ -9,6 +9,7 @@ extern "C" {
 
 void delay_ms(uint32_t delay);
 void systick_init(uint32_t ticks);
+uint32_t systick_now(void);
 
 #ifdef __cplusplus
 }

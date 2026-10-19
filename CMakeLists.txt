@@ -128,6 +128,7 @@ else()
     i2c_tests
     tests/i2c_tests.cpp
     drivers/src/i2c.c
+    drivers/src/systick.c
   )
   target_link_libraries(
     i2c_tests

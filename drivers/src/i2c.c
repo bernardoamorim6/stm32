@@ -1,7 +1,10 @@
 #include "../include/i2c.h"
 #include "../include/stm32c031_regs.h"
 #include "bitops.h"
+#include "systick.h"
 #include <stdint.h>
+
+#define TIMEOUT_MS 30 /* About 23ms per message*/
 
 
 void i2c_init(I2C_Regs *i2c){
@@ -98,13 +101,27 @@ i2c_state_t i2c_step(I2C_Regs *i2c, i2c_xfer_t *xfer, uint32_t now_ms){
                 i2c->ICR = make_mask(I2C_ICR_STOPCF, 1) 
                           | make_mask(I2C_ICR_NACKCF, 1);
                 xfer->state = xfer->end_state;
+                return xfer->state;
             }
             break;
         default: break;
     }
 
     if (now_ms - xfer->start_ms > xfer->timeout_ms) {
-        return I2C_ERR_TIMEOUT;
+        xfer->state = I2C_ERR_TIMEOUT;
     }
+
     return xfer->state;
 }
+
+
+i2c_state_t i2c_read_reg(I2C_Regs *i2c, uint8_t addr, uint8_t reg, uint8_t *buf, uint8_t len){
+    i2c_xfer_t i2c_local;
+    i2c_xfer_begin(&i2c_local, addr, reg, buf, len, systick_now(), TIMEOUT_MS);
+    while (i2c_local.state < I2C_DONE) {
+        i2c_step(i2c, &i2c_local, systick_now());
+
+    }
+    return i2c_local.state;
+}
+

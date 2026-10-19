@@ -1,6 +1,7 @@
 #include "../drivers/include/bitops.h"
 #include "../drivers/include/systick.h"
 #include "gpio.h"
+#include "i2c.h"
 #include "usart.h"
 #include "stm32c031_regs.h"
 #include <stdint.h>
@@ -51,6 +52,11 @@ int main(void) {
     systick_init(12000);
     uart_init(USART2, 12000000, 115200);
     uart_write_string(USART2, "echo ready\r\n");
+    i2c_init(I2C1);
+    uint8_t id = 0;
+    i2c_state_t st = i2c_read_reg(I2C1, 0x76, 0xD0, &id, 1);
+    uart_write_byte(USART2, '0' + st);
+
     while (1) {
         // *GPIOA_ODR = insert(*GPIOA_ODR, 1, 5, 1);
         // delay_ms(500);

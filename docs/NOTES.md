@@ -37,6 +37,23 @@ STM32_Programmer_CLI -c port=SWD -w build-arm/firmware.elf -rst
 
 The `.elf` extension is load-bearing: the programmer picks its parser from the extension, which is why `CMakeLists.txt` sets `set_target_properties(firmware PROPERTIES SUFFIX ".elf")`.
 
+## Serial console
+
+USART2 reaches the laptop through the ST-LINK's virtual COM port, which shows up as `/dev/ttyACM0`.
+
+```bash
+picocom -b 115200 /dev/ttyACM0      # open the console
+```
+
+- Quit with `Ctrl-A` then `Ctrl-X`.
+- picocom has no local echo, so every character on screen came back from the board. If typing shows nothing, the echo loop is not running.
+- Messages printed at boot are gone by the time picocom opens. Open picocom first, then flash (the `-rst` restarts the board), or press the black reset button.
+- Only one program can hold the port. Close picocom before running the load test:
+
+```bash
+python3 tools/uart_loadtest.py --bytes 16384   # echo stress test, defaults to /dev/ttyACM0 at 115200
+```
+
 ## Inspecting the firmware
 
 ```bash

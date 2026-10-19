@@ -60,6 +60,7 @@ typedef struct {
 } i2c_xfer_t;
 
 void i2c_init(I2C_Regs *i2c);
+i2c_state_t i2c_read_reg(I2C_Regs *i2c, uint8_t addr, uint8_t reg, uint8_t *buf, uint8_t len);
 
 /* Prepares a read of len bytes starting at register reg. Touches no hardware. */
 void i2c_xfer_begin(i2c_xfer_t *xfer, uint8_t addr, uint8_t reg, uint8_t *buf,
