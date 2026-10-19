@@ -28,11 +28,11 @@ This is a work in progress. What follows is what actually runs and is tested, no
 
 **Startup code** (`drivers/src/startup.c`) Full 48-entry vector table transcribed from RM0490's interrupt table, placed at `0x08000000`. Unused handlers resolve to a single `DefaultHandler` through `__attribute__((weak, alias(...)))`, so a real handler defined anywhere else silently overrides the default at link time. `Reset_Handler` copies `.data` from Flash to SRAM, zeroes `.bss`, and calls `main`.
 
-**Blinky** (`app/main.c`) Direct register writes: GPIOA clock enable in `RCC_IOPENR`, PA5 to output mode in `GPIOA_MODER`, toggle via `GPIOA_ODR`.
+**Application** (`app/main.c`) Brings up the clock, pins, SysTick, UART and I²C, runs an I²C bus scan and two chip ID reads, then loops echoing serial input back and driving the user LED from the user button. Each feature is a named function, so `main` reads as a list of what the firmware does.
 
 **SysTick and `delay_ms()`** (`drivers/src/systick.c`) Defined the four SysTick registers from PM0223 as a `volatile uint32_t` struct at `0xE000E010`. `systick_init()` writes the reload value, clears the current count, then enables the counter with its interrupt, in that order. `SysTick_Handler` increments a `static volatile` millisecond counter, and `delay_ms()` waits on the difference, using unsigned subtraction so it stays correct across a counter wrap. The handler needs no registration: defining it here overrides the weak alias in `startup.c` at link time, which `nm` confirms: `SysTick_Handler` moves off `DefaultHandler`'s address onto its own.
 
-**Register definitions** (`drivers/include/stm32c031_regs.h`) A `GPIO_Regs` struct and a `USART_Regs` struct, both `volatile uint32_t` members in RM0490's register order, written by hand from the manual rather than taken from a vendor header. The struct layout *is* the memory map, so a `static_assert` on `offsetof` pins every member to its documented offset, plus one on each total size. A member added, reordered or mis-padded becomes a build failure naming that member, instead of silently redirecting every access after it.
+**Register definitions** (`drivers/include/stm32c031_regs.h`) `GPIO_Regs`, `USART_Regs` and `I2C_Regs` structs, all `volatile uint32_t` members in RM0490's register order, written by hand from the manual rather than taken from a vendor header. The struct layout *is* the memory map, so a `static_assert` on `offsetof` pins every member to its documented offset, plus one on each total size. A member added, reordered or mis-padded becomes a build failure naming that member, instead of silently redirecting every access after it.
 
 **GPIO driver** (`drivers/src/gpio.c`) `gpio_set_mode`, `set_pull`, `set_otype`, `set_ospeed`, `set_af`, `gpio_write` and `gpio_read`, each taking a `GPIO_Regs *` rather than hard-coding a base address. Field writes go through `bitops.h`. `gpio_write` uses `BSRR` rather than a read-modify-write on `ODR`: bits 15:0 set, bits 31:16 clear, zeros do nothing, so a single store cannot race an interrupt touching the same port.
 
@@ -46,6 +46,10 @@ This is a work in progress. What follows is what actually runs and is tested, no
 
 **C++17 register layer** (`hal/include/reg.hpp`) A field's register, position and width are template parameters, so writing a value that does not fit, or declaring a field that runs past bit 31, fails to compile. Byte-for-byte identical machine code to the equivalent C. Covered by 10 host tests and 2 compile-time rejection tests. See [below](#the-c17-layer-checked-at-compile-time-free-at-run-time).
 
+**I²C controller** (`drivers/src/i2c.c`) A register read (write the register number, repeated START, read `len` bytes) as a non-blocking state machine. `i2c_step` reads `ISR` once, takes at most one action and returns, checking bus errors first, then NACK, then the flag its state is waiting for, then the timeout. Time comes in as an argument instead of being read inside, so the timeout is testable on the host, including across the 32-bit tick wrap. A NACK does not end the transfer on the spot: the peripheral sends STOP by itself, so the machine waits for `STOPF` and then reports which byte was refused. `i2c_read_reg` is the blocking wrapper, with a 30 ms budget against a worst case of about 23 ms for a 255-byte read at 100 kHz. `TIMINGR` is `0x30420F13` from RM0490's table for 100 kHz from a 16 MHz kernel clock, which is why I2C1 runs from HSIKER (16 MHz) rather than the 12 MHz PCLK. Covered by 27 host tests.
+
+Verified on the board: a scan of every 7-bit address finds the MPU-6050 at `0x68` and the pressure sensor at `0x76`. Reading their chip ID registers returns `0x68` for the MPU-6050 and **`0x58`** for the other, which is a BMP280, not the BME280 (`0x60`) the board was sold as. So the sensor driver targets the BMP280: the same temperature and pressure maths, no humidity.
+
 **Clock tree** The reset clock path is documented end to end in
 [`docs/NOTES.md`](docs/NOTES.md): HSI48 (48 MHz) -> `HSIDIV` ÷4 -> HSISYS -> `SW` mux ->
 SYSCLK -> `HPRE` ÷1 -> HCLK = **12 MHz** at the core, with the controlling register field and bit range for each stage. Verified by reading `RCC_CR` off the chip at the reset halt, and by deliberately changing `HSIDIV` to ÷8 and observing the blink rate halve.
@@ -57,7 +61,9 @@ The scope below is the plan, not a promise, it gets revised as I go, and this se
 **C layer (C17), remaining:**
 
 - A `printf`-style formatter over the UART. Output is currently raw bytes and strings only.
-- I²C master written from scratch, then a BME280 driver including the compensation maths
+- A logic analyser capture of one I²C register read, annotated byte by byte
+- Burst reads on hardware (the state machine already handles up to 255 bytes, tested on the host only), and bus recovery for a target holding SDA low
+- BMP280 driver including the compensation maths, host-tested against known values
 - SSD1306 as a second address on the same bus. Enough to prove addressing and capture two devices sharing a bus, no display driver
 
 **Host tests for the UART driver.** `uart_init` takes a pointer and a clock frequency, so it has the same testable shape as the GPIO driver, but no suite exists for it yet. The obvious cases are the `BRR` divisor for a few clock and baud combinations, and that `TE` and `UE` end up set without disturbing the framing fields.
@@ -293,6 +299,7 @@ C++ sources in the firmware build with `-fno-exceptions -fno-rtti -fno-threadsaf
 | Toolchain | Arm GNU Toolchain **15.3.Rel1** (`arm-none-eabi-gcc`) |
 | Host tests | GoogleTest, fetched by CMake at configure time |
 | Flash / debug | STM32CubeCLT: `STM32_Programmer_CLI`, `ST-LINK_gdbserver` |
+| Sensors | BMP280 (sold as a BME280) at `0x76`, MPU-6050 at `0x68`, on I2C1 (PB8 SCL, PB9 SDA) |
 
 The toolchain version is pinned to `15.3.Rel1` in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) so CI builds with the same compiler as the development machine.
 
@@ -300,7 +307,7 @@ Current firmware size:
 
 ```
    text    data     bss     dec     hex
-   1440       0     148    1588     634
+   2408       0     148    2556     9fc
 ```
 
 ---
@@ -347,9 +354,9 @@ What this should show, and why it matters:
 
 ```
 0 .isr_vector   000000c0  08000000  08000000
-1 .text         000004e0  080000c0  080000c0
-2 .data         00000000  20000000  080005a0
-3 .bss          00000094  20000000  080005a0
+1 .text         000008a8  080000c0  080000c0
+2 .data         00000000  20000000  08000968
+3 .bss          00000094  20000000  08000968
 ```
 
 `.isr_vector` sits at `0x08000000`: the vector table has to be the first thing in Flash or the core can't find the initial stack pointer and reset vector on boot.
@@ -364,8 +371,8 @@ What this should show, and why it matters:
 
 ```
 app/                 application entry point
-drivers/include/     C headers (bitops.h, stm32c031_regs.h, gpio.h, systick.h, usart.h, ringbuffer.h, critical.h)
-drivers/src/         C sources (startup.c, systick.c, gpio.c, usart.c, ringbuffer.c)
+drivers/include/     C headers (bitops.h, stm32c031_regs.h, gpio.h, systick.h, usart.h, i2c.h, ringbuffer.h, critical.h)
+drivers/src/         C sources (startup.c, systick.c, gpio.c, usart.c, i2c.c, ringbuffer.c)
 hal/include/         C++17 register layer (reg.hpp)
 bench/               reproducible size comparisons (bench/gpio_mode/run.sh)
 tests/               GoogleTest suites, host-only
@@ -382,7 +389,7 @@ docs/                NOTES.md, the working log (reference PDFs are gitignored)
 
 ## Testing a driver without hardware
 
-68 GoogleTest cases and 2 compile-time rejection tests run on the host, with no board attached. That is possible because no driver function knows its own address:
+95 GoogleTest cases and 2 compile-time rejection tests run on the host, with no board attached. That is possible because no driver function knows its own address:
 
 ```c
 void gpio_set_mode(GPIO_Regs *port, uint32_t pin, gpio_mode_t mode);
@@ -409,6 +416,12 @@ Both suites have been checked against deliberately broken code, not just working
 
 The last row is the argument for writing failure-path tests at all. Only one case catches it, every happy path still passes, and without that single test the bug ships silently.
 
+### The I²C state machine, and the bug the tests missed
+
+The I²C tests play the hardware: each one sets `ISR` to whatever the peripheral would be reporting, calls `i2c_step`, and checks both the state that comes back and what was written to `CR2`, `TXDR` and `ICR`. Every arrow of the state diagram has a test, plus the edges: a deadline exactly reached versus just exceeded, the tick counter wrapping mid-transfer, a bus error arriving together with the flag being waited for, and finished transfers writing nothing.
+
+They still let one bug through. On the timeout path, `i2c_step` returned `I2C_ERR_TIMEOUT` without storing it, and every test only looked at the return value. The blocking wrapper loops on the stored state, so the first read on the board, with the pins not yet configured, hung forever instead of timing out. The fix was one line. The more useful change was to the test fixture, which now checks after every step that the returned state is the stored one. That turns one missed case into a property all 27 tests enforce, and it fails 5 of them against the original code.
+
 ## CI
 
 Three jobs on every push and pull request ([`ci.yml`](.github/workflows/ci.yml)):
@@ -429,6 +442,7 @@ Both builds use `-Wall -Wextra`. `-Werror` is a CMake option, `WARNINGS_AS_ERROR
 
 - **The SVD disagrees with the reference manual.** ST's own `STM32C031.svd` gives `RCC_CR` a reset value of `0x00000500`, putting `HSIDIV` at ÷1 and implying a 48 MHz boot clock. RM0490 says ÷4, and its revision history records the correction. I read the register off the chip and got `0x00001540`. The manual is right, the SVD is wrong on two fields, and the silicon settles it.
 - **A vector table entry is one greater than the function it points to.** `Reset_Handler` is at `0x08000218`; the table holds `0x08000219`. That's the Thumb bit, and a cleared bit 0 means an immediate HardFault.
+- **A state machine that returned a state without storing it.** Every host test passed, and the first I²C read on the board hung. The tests now check the stored state after every step; details under [testing](#testing-a-driver-without-hardware).
 - **A blinking LED hid a wrong register read.** My first read-modify-write on `ODR` read `MODER` instead. The LED blinked correctly anyway, because bit 5 was still being set and cleared as intended, so the symptom I was watching for was present while the code was wrong.
 
 `docs/NOTES.md` also holds the full clock-path derivation and a written answer to "what happens between reset and `main()`".

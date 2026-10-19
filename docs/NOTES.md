@@ -696,6 +696,46 @@ Cleared by software by setting the STOPCF bit (cleared by hardware when PE = 0)
 | `TC` | 6 | software setting `START` or `STOP` in `CR2` |
 | `BUSY` | 15 | hardware, when it sees a STOP |
 
+## The kernel clock decides TIMINGR
+
+`TIMINGR` packs the prescaler, setup and hold delays and both halves of the SCL period into one register, and working them out by hand is error-prone. RM0490 gives ready-made values for a few kernel clock frequencies, and 12 MHz is not one of them. So instead of computing my own, I fed I2C1 from HSIKER: `I2C1SEL = 10` in `RCC_CCIPR` (bits 13:12), and HSIKER is HSI48 ÷3 at reset, so 16 MHz. The table's 100 kHz entry for 16 MHz is `0x30420F13`:
+
+| Field | Value | Meaning at 16 MHz |
+|---|---|---|
+| `PRESC` | 3 | one timing tick is 4 / 16 MHz = 250 ns |
+| `SCLDEL` | 4 | data setup time, 5 ticks |
+| `SDADEL` | 2 | data hold time, 2 ticks |
+| `SCLH` | 0x0F | SCL high for 16 ticks = 4.0 µs |
+| `SCLL` | 0x13 | SCL low for 20 ticks = 5.0 µs |
+
+4.0 + 5.0 µs is 9 µs, and the rise and synchronisation time makes up the rest of the 10 µs period.
+
+## Pins
+
+PB8 is SCL and PB9 is SDA, both AF6, which reach the Arduino header as D15 and D14 on CN5 pins 10 and 9. Three settings, all needed:
+
+- **Open-drain.** I²C devices only ever pull a line low, and a resistor brings it back high. A push-pull output driving high while a target pulls low would be a short.
+- **Pull-ups.** Breakout boards usually carry their own. The internal ones (around 40 kΩ) are weak but enough at 100 kHz, and without any pull-up an idle line never goes high.
+- **Mode last.** `MODER` hands the pin to the peripheral. Setting it after the type, pull and AF number means the pin is never connected while half configured.
+
+## Bring-up, one digit at a time
+
+The first board test printed the final `i2c_state_t` as a digit over the UART, and each digit said how far the bus got:
+
+| Result | Situation | What it proved |
+|---|---|---|
+| hang | pins not configured | a bug: the timeout was returned but never stored, see the mistakes log |
+| `9` timeout | pins not configured | the wrapper, `systick_now()` and the timeout work. The peripheral saw SCL held low and waited for it forever |
+| `9` again | AF set, mode not set | nothing: the pins were still analog, see the mistakes log |
+| `6` NACK on address | pins configured, nothing wired | the bus works: START and the address went out, nobody answered, STOPF came back |
+| scan: `0x68`, `0x76` | both sensors wired | two devices sharing two wires, each answering its own address |
+
+Then the chip IDs: register `0x75` of the MPU-6050 read `0x68`, which is correct. Register `0xD0` of the "BME280" read `0x58`, which is a **BMP280**. The two chips share the address, register map and compensation maths for temperature and pressure; the BME280 adds humidity. Cheap boards are often mislabelled, and this is exactly what reading the ID is for: the scan only proves *something* answers at `0x76`.
+
+## Why the scan reads register 0
+
+The textbook scan sends only the address and checks for an ACK. My state machine has no zero-length transfer, so the scan does a one-byte read of register `0x00` instead. That writes a register pointer to every device that answers, which is harmless for these two sensors but not guaranteed to be for every device.
+
 
 # How the tests work, for studying
 
@@ -1026,4 +1066,8 @@ Lesson: a working output doesn't verify the write. Read the register back.
 ## A vector table entry is one greater than the function it points to
 
 `nm` reported `Reset_Handler` at `0x08000218`, but the vector table held `0x08000219`. That's the Thumb bit: Cortex-M executes Thumb only, so bit 0 of every vector entry must be set, and the core clears it when loading PC. A cleared bit 0 means an immediate HardFault.
+## Two writes to CR2 would have started a transfer to address 0
 
+My first draft of the START step wrote `CR2` twice: once with START and NBYTES, then `|=` with the address. Setting START begins the transfer immediately, so on hardware the first write would have started a transfer to address 0 before the second write arrived. Caught in review before it ran.
+
+Lesson: when one bit in a register triggers an action, build the whole value first and write it once.

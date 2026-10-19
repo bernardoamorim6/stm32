@@ -11,49 +11,38 @@ static void clock_init(void){
     uint32_t volatile *RCC_CR = (uint32_t volatile *)(0x40021000);
     /* Clock in regular value of dividing by 4 aka 12MHz frequency */
     *RCC_CR = insert(*RCC_CR, 0b010, 11, 3);
-    /* Set HSITRIM to a lower value than 64 in order to improve frequecny from 100.5 to 99.94Hz, 
+    /* Set HSITRIM to a lower value than 64 in order to improve frequecny from 100.5 to 99.94Hz,
     This is specific to this chip and could require a different value on another chip */
     uint32_t volatile *RCC_ICSCR = (uint32_t volatile *)(0x40021000 + 0x04);
     *RCC_ICSCR = insert(*RCC_ICSCR, 62, 8, 7);
 
     uint32_t volatile *RCC_IOPENR = (uint32_t volatile *)(0x40021000+0x34);
-    *RCC_IOPENR |= 0b111;
+    *RCC_IOPENR |= 0b111; /* GPIOA | GPIOB | GPIOC */
 
     uint32_t volatile *RCC_APBENR1 = (uint32_t volatile *)(0x40021000+0x3c);
     *RCC_APBENR1 |= make_mask(17, 1) | make_mask(21, 1); /* USART2EN | I2C1EN */
 
+    /* I2C1SEL = HSIKER (16 MHz), the clock RM0490's TIMINGR table assumes */
     uint32_t volatile *RCC_CCIPR = (uint32_t volatile *)(0x40021000+0x54);
     *RCC_CCIPR = insert(*RCC_CCIPR, 0b10, 12, 2);
 }
 
-static void print_hex(uint8_t value) {
-    /* send "0x", then the high nibble, then the low nibble, as characters */
-    char low_nibble = "0123456789ABCDEF"[value & 0xF];
-    char high_nibble = "0123456789ABCDEF"[value >> 4];
-    uart_write_byte(USART2, '0');
-    uart_write_byte(USART2, 'x');
-    uart_write_byte(USART2, high_nibble);
-    uart_write_byte(USART2, low_nibble);
-}
-
-int main(void) {
-    /* Initialize the clock */
-    clock_init();
-
-    // uint32_t volatile *GPIOA_MODER = (uint32_t volatile *)(0x50000000 + 0x00);
-    // *GPIOA_MODER = insert(*GPIOA_MODER, 1, 10, 2);
+static void pins_init(void){
+    /* PA5: user LED. PC13: user button, low when pressed */
     gpio_set_mode(GPIOA, 5, GPIO_MODE_OUTPUT);
     gpio_set_otype(GPIOA, 5, GPIO_TYPE_PUSH_PULL);
     gpio_set_ospeed(GPIOA, 5, GPIO_SPEED_VLOW);
-
     gpio_set_mode(GPIOC, 13, GPIO_MODE_INPUT);
     gpio_set_pull(GPIOC, 13, GPIO_PUPD_PU);
 
+    /* PA2/PA3: USART2 TX/RX, routed to the ST-LINK virtual COM port */
     gpio_set_mode(GPIOA, 2, GPIO_MODE_ALTERNATE);
     gpio_set_mode(GPIOA, 3, GPIO_MODE_ALTERNATE);
     gpio_set_af(GPIOA, 2, GPIO_AFR_AF1);
     gpio_set_af(GPIOA, 3, GPIO_AFR_AF1);
 
+    /* PB8/PB9: I2C1 SCL/SDA on CN5 pins 10 and 9. Open-drain, and the mode is
+       set last so the pin is never handed over half configured. */
     gpio_set_otype(GPIOB, 8, GPIO_TYPE_OPEN_DRAIN);
     gpio_set_otype(GPIOB, 9, GPIO_TYPE_OPEN_DRAIN);
     gpio_set_pull(GPIOB, 8, GPIO_PUPD_PU);
@@ -62,17 +51,26 @@ int main(void) {
     gpio_set_af(GPIOB, 9, GPIO_AFR_AF6);
     gpio_set_mode(GPIOB, 8, GPIO_MODE_ALTERNATE);
     gpio_set_mode(GPIOB, 9, GPIO_MODE_ALTERNATE);
+}
 
+/* A raw byte would show up as its ASCII character, so send one hex digit per nibble */
+static void print_hex(uint8_t value) {
+    char low_nibble = "0123456789ABCDEF"[value & 0xF];
+    char high_nibble = "0123456789ABCDEF"[value >> 4];
+    uart_write_byte(USART2, '0');
+    uart_write_byte(USART2, 'x');
+    uart_write_byte(USART2, high_nibble);
+    uart_write_byte(USART2, low_nibble);
+}
 
-    uint32_t volatile *NVIC_ISER = (uint32_t volatile *)0xE000E100;
-    *NVIC_ISER = make_mask(28, 1);
+static void print_state(i2c_state_t st) {
+    uart_write_string(USART2, " state ");
+    uart_write_byte(USART2, '0' + st);
+}
 
-
-    // uint32_t volatile *GPIOA_ODR = (uint32_t volatile *)(0x50000000 + 0x14);
-    systick_init(12000);
-    uart_init(USART2, 12000000, 115200);
-    uart_write_string(USART2, "echo ready\r\n");
-    i2c_init(I2C1);
+/* Every valid 7-bit address. A NACK means nobody is there; anything other
+   than DONE or a NACK is a bus problem, so it is printed too. */
+static void i2c_bus_scan(void) {
     uart_write_string(USART2, "scanning\r\n");
     for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
         uint8_t b;
@@ -82,31 +80,54 @@ int main(void) {
             uart_write_string(USART2, "\r\n");
         } else if (st != I2C_ERR_NACK_ADDR) {
             print_hex(addr);
-            uart_write_string(USART2, " err ");
-            uart_write_byte(USART2, '0' + st);
+            print_state(st);
             uart_write_string(USART2, "\r\n");
         }
     }
     uart_write_string(USART2, "scan done\r\n");
+}
 
+static void print_chip_id(const char *name, uint8_t addr, uint8_t reg) {
+    uint8_t id = 0;
+    i2c_state_t st = i2c_read_reg(I2C1, addr, reg, &id, 1);
+    uart_write_string(USART2, name);
+    uart_write_string(USART2, " id ");
+    print_hex(id);
+    print_state(st);
+    uart_write_string(USART2, "\r\n");
+}
+
+/* Neither call blocks on the wire, so the button stays responsive. */
+static void echo_one_byte(void) {
+    uint8_t byte;
+    if (uart_read_byte(&byte)) {
+        uart_write_byte(USART2, byte);
+    }
+}
+
+static void button_drives_led(void) {
+    gpio_write(GPIOA, 5, gpio_read(GPIOC, 13) == 0);
+}
+
+int main(void) {
+    clock_init();
+    pins_init();
+
+    uint32_t volatile *NVIC_ISER = (uint32_t volatile *)0xE000E100;
+    *NVIC_ISER = make_mask(28, 1); /* USART2 is IRQ 28 */
+
+    systick_init(12000);
+    uart_init(USART2, 12000000, 115200);
+    i2c_init(I2C1);
+
+    i2c_bus_scan();
+    print_chip_id("bmp280", 0x76, 0xD0);    /* expect 0x60 for a BME280, 0x58 for a BMP280 */
+    print_chip_id("mpu6050", 0x68, 0x75);   /* expect 0x68 */
+
+    uart_write_string(USART2, "echo ready\r\n");
     while (1) {
-        // *GPIOA_ODR = insert(*GPIOA_ODR, 1, 5, 1);
-        // delay_ms(500);
-        // *GPIOA_ODR = insert(*GPIOA_ODR, 0, 5, 1);
-        // delay_ms(500);
-        /* Echo: whatever the ISR dropped into the RX ring goes back
-           out through the TX ring. Neither call blocks on the wire, so
-           button stays responsive. */
-        uint8_t byte;
-        if (uart_read_byte(&byte)) {
-            uart_write_byte(USART2, byte);
-        }
-
-        if (gpio_read(GPIOC, 13) == 0) {
-            gpio_write(GPIOA, 5, 1);
-        } else {
-            gpio_write(GPIOA, 5, 0);
-        }
+        echo_one_byte();
+        button_drives_led();
     }
     return 0;
 }
