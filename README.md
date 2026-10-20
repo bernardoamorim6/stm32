@@ -6,12 +6,13 @@ Every register definition, the linker script, the vector table and the reset han
 
 I did use ST's debugger nad flashing tools, I only wanted to use hand written instead of generated code, not refuse vendor tooling.
 
-**If you only read five things:**
+**If you only read six things:**
 
 - [Trimming the internal oscillator](#trimming-it-out) from +0.5% to -0.06% error, and working out where the granularity floor is rather than stopping when it looked good enough
 - [One UART bit measured at 8.625 µs](#the-independent-measurement) against 8.667 predicted, with an honest note on why the analyser cannot resolve the difference
 - [An interrupt handler that was 2.3x over its time budget](#measured-the-isr-was-too-slow-before-it-was-wrong), found by counting instructions against the 86.8 µs byte time rather than guessing at a race
 - [A test suite checked against deliberately broken code](#testing-a-driver-without-hardware), because passing tests only prove the tests run
+- [One I²C register read on the wire](#on-the-wire), decoded byte for byte against the state machine that drives it, with the clock measured over 1137 cycles
 - [A C++ register template that compiles to the same bytes as the C](#the-c17-layer-checked-at-compile-time-free-at-run-time), while rejecting out-of-range writes at compile time
 
 ---
@@ -61,7 +62,6 @@ The scope below is the plan, not a promise, it gets revised as I go, and this se
 **C layer (C17), remaining:**
 
 - A `printf`-style formatter over the UART. Output is currently raw bytes and strings only.
-- A logic analyser capture of one I²C register read, annotated byte by byte
 - Burst reads on hardware (the state machine already handles up to 255 bytes, tested on the host only), and bus recovery for a target holding SDA low
 - BMP280 driver including the compensation maths, host-tested against known values
 - SSD1306 as a second address on the same bus. Enough to prove addressing and capture two devices sharing a bus, no display driver
@@ -286,6 +286,39 @@ Three decisions behind it:
 - **The first write phase uses `AUTOEND=0`.** That makes the peripheral raise `TC` instead of sending STOP, which is what allows the repeated START into the read. The read phase uses `AUTOEND=1`, so the final STOP comes from hardware.
 - **Time is an input.** `i2c_step` takes `now_ms` rather than reading the tick itself, so every timeout path, including the 32-bit tick wrap, is tested on the host without waiting.
 
+### On the wire
+
+The BMP280 chip ID read, captured at boot at 4 MHz with PulseView's I²C decoder (D0 is SCL, D1 is SDA):
+
+![BMP280 chip ID read](images/i2c-bmp280-id-read.png)
+
+Every state in the diagram shows up as bus traffic. `START_WRITE` is the S and `Address write: 76`: on the wire that byte is `0xEC`, the 7-bit address shifted left with the write bit at 0, which is the `addr << 1` in the `CR2` write. `WAIT_TXIS` sends `Data write: D0`, the register number. `WAIT_TC` produces the repeated START (Sr) and `Address read: 76`, which is `0xED`. `WAIT_RXNE` collects `Data read: 58`, and the N after it is not an error: a controller NACKs the last byte to tell the target it is done, which the peripheral does by itself because `NBYTES` was 1. `AUTOEND` then sends the STOP (P) that `WAIT_STOPF` waits for.
+
+The error path, from the bus scan, where nobody answers at `0x74`. The NACK is followed straight away by a STOP the software never asked for, which is why NACK leads to `WAIT_STOPF` in the diagram rather than ending the transfer:
+
+![NACK on an empty address](images/i2c-nack.png)
+
+Measured from the saved capture ([`captures/i2c-boot-scan-and-ids.sr`](captures/i2c-boot-scan-and-ids.sr), opens in PulseView):
+
+| | Measured | From `TIMINGR` |
+|---|---|---|
+| SCL period, mean of 1137 cycles | **9.66 µs, 103.5 kHz** | |
+| SCL high | 4.35 µs | `SCLH`: 4.0 µs |
+| SCL low | 5.32 µs | `SCLL`: 5.0 µs |
+| One chip ID read, START to STOP | 381 µs | |
+| One NACKed address in the scan | 106 µs, then 23 µs of software before the next | |
+| The whole scan, `0x08` to `0x77` | about 14.4 ms | |
+
+Each half of the clock runs about 0.3 µs longer than `TIMINGR` asks for. That is expected: the peripheral starts counting `SCLH` only once it sees SCL actually high, so the rise time through the pull-ups and its input synchronisation are added to every half period. The sample rate limits a single period to 0.25 µs steps, which is why one cursor reading gave 9.75 µs (102.6 kHz); the mean over the whole capture is the better number.
+
+**103.5 kHz is slightly over Standard-mode's 100 kHz limit.** RM0490's value evidently assumes slower edges than this bus has, with short wires and the breakout boards' pull-ups. Both sensors support 400 kHz Fast-mode, so nothing misbehaves, but the honest description of this bus is "about 100 kHz", not "100 kHz". Adding one or two ticks to `SCLL` would bring it under the limit.
+
+The capture also shows the controller waiting for the software. After each ACK the peripheral holds SCL low until `i2c_step` has noticed the flag and written `TXDR` or `CR2`. After the address ACK that stretch lasted 3.6 µs longer than a normal clock in the BMP280 read, but 12.8 µs in the MPU-6050 read, visible as the gap before `Data write: 75`:
+
+![MPU-6050 chip ID read](images/i2c-mpu6050-id-read.png)
+
+The extra 9 µs is most likely the UART interrupt sending the scan results at that moment. The bus tolerates it because the controller owns the clock: a target only samples on a clock edge, so a late edge is a slower bit, never a wrong one. That is a real difference from the UART, whose receiver cannot pause the sender: software that is late there loses data, which is exactly what the [slow ISR](#measured-the-isr-was-too-slow-before-it-was-wrong) did.
+
 ## The C++17 layer: checked at compile time, free at run time
 
 `hal/include/reg.hpp` describes a register field as a type:
@@ -418,6 +451,7 @@ linker/              linker script
 cmake/               ARM toolchain file
 svd/                 CMSIS-SVD register descriptions (for the debugger)
 images/              measurement captures referenced from this README
+captures/            raw logic analyser sessions (.sr, opens in PulseView)
 tools/               host-side test scripts (uart_loadtest.py)
 docs/                NOTES.md, the working log (reference PDFs are gitignored)
 .github/workflows/   CI

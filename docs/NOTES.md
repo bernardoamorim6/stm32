@@ -708,7 +708,9 @@ Cleared by software by setting the STOPCF bit (cleared by hardware when PE = 0)
 | `SCLH` | 0x0F | SCL high for 16 ticks = 4.0 µs |
 | `SCLL` | 0x13 | SCL low for 20 ticks = 5.0 µs |
 
-4.0 + 5.0 µs is 9 µs, and the rise and synchronisation time makes up the rest of the 10 µs period.
+4.0 + 5.0 µs is 9 µs. Measured on the bus, averaged over 1137 cycles, the period is 9.66 µs (103.5 kHz): high 4.35 µs, low 5.32 µs. The peripheral only starts counting each half once it sees SCL actually change, so the rise time through the pull-ups and the input synchronisation (a few cycles of the 16 MHz kernel clock) are added to both halves. The table's value evidently assumes slower edges than my short wires and breakout pull-ups give, which puts this bus slightly over Standard-mode's 100 kHz. Both sensors are rated for 400 kHz, so it is harmless, and one or two more ticks of `SCLL` would fix it.
+
+A single cursor measurement said 102.56 kHz (9.75 µs). At 4 MHz one sample is 0.25 µs, so a single period can only read as 9.50 or 9.75 µs; averaging many periods is what gets below the sample step.
 
 ## Pins
 
