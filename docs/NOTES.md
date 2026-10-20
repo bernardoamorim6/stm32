@@ -708,7 +708,7 @@ Cleared by software by setting the STOPCF bit (cleared by hardware when PE = 0)
 | `SCLH` | 0x0F | SCL high for 16 ticks = 4.0 µs |
 | `SCLL` | 0x13 | SCL low for 20 ticks = 5.0 µs |
 
-4.0 + 5.0 µs is 9 µs. Measured on the bus, averaged over 1137 cycles, the period is 9.66 µs (103.5 kHz): high 4.35 µs, low 5.32 µs. The peripheral only starts counting each half once it sees SCL actually change, so the rise time through the pull-ups and the input synchronisation (a few cycles of the 16 MHz kernel clock) are added to both halves. The table's value evidently assumes slower edges than my short wires and breakout pull-ups give, which puts this bus slightly over Standard-mode's 100 kHz. Both sensors are rated for 400 kHz, so it is harmless, and one or two more ticks of `SCLL` would fix it.
+4.0 + 5.0 µs is 9 µs. Measured on the bus, averaged over 1381 cycles, the period is 9.66 µs (103.5 kHz): high 4.35 µs, low 5.32 µs. The peripheral only starts counting each half once it sees SCL actually change, so the rise time through the pull-ups and the input synchronisation (a few cycles of the 16 MHz kernel clock) are added to both halves. The table's value evidently assumes slower edges than my short wires and breakout pull-ups give, which puts this bus slightly over Standard-mode's 100 kHz. Both sensors are rated for 400 kHz, so it is harmless, and one or two more ticks of `SCLL` would fix it.
 
 A single cursor measurement said 102.56 kHz (9.75 µs). At 4 MHz one sample is 0.25 µs, so a single period can only read as 9.50 or 9.75 µs; averaging many periods is what gets below the sample step.
 
@@ -733,6 +733,29 @@ The first board test printed the final `i2c_state_t` as a digit over the UART, a
 | scan: `0x68`, `0x76` | both sensors wired | two devices sharing two wires, each answering its own address |
 
 Then the chip IDs: register `0x75` of the MPU-6050 read `0x68`, which is correct. Register `0xD0` of the "BME280" read `0x58`, which is a **BMP280**. The two chips share the address, register map and compensation maths for temperature and pressure; the BME280 adds humidity. Cheap boards are often mislabelled, and this is exactly what reading the ID is for: the scan only proves *something* answers at `0x76`.
+
+## Burst read: the calibration block
+
+Each BMP280 is trimmed at the factory, and the coefficients sit in registers `0x88` to `0x9F`. One read with `len = 24` gets all of them, because the sensor advances its register pointer after every byte. They are 16-bit and little-endian, low byte first. Mine, next to the example values in Bosch's datasheet:
+
+| | Bytes | Value | Bosch example |
+|---|---|---|---|
+| dig_T1 (u16) | D2 6D | 28114 | 27504 |
+| dig_T2 | 8E 66 | 26254 | 26435 |
+| dig_T3 | 32 00 | 50 | -1000 |
+| dig_P1 (u16) | 8C 90 | 37004 | 36477 |
+| dig_P2 | 5E D6 | -10658 | -10685 |
+| dig_P3 | D0 0B | 3024 | 3024 |
+| dig_P4 | D2 1A | 6866 | 2855 |
+| dig_P5 | 3B FF | -197 | 140 |
+| dig_P6 | F9 FF | -7 | -7 |
+| dig_P7 | 8C 3C | 15500 | 15500 |
+| dig_P8 | F8 C6 | -14600 | -14600 |
+| dig_P9 | 70 17 | 6000 | 6000 |
+
+Everything except `dig_T1` and `dig_P1` is signed. Five match Bosch's example exactly and the rest are in range, which is the check that byte order and auto-increment are right: one shifted byte would turn every value into nonsense.
+
+On the wire there is no clock stretching between the data bytes. `RXDR` is double buffered, so the peripheral shifts in the next byte while software reads the previous one, and the controller only has to wait if `RXDR` is still full when the next byte completes.
 
 ## Why the scan reads register 0
 
@@ -1073,3 +1096,19 @@ Lesson: a working output doesn't verify the write. Read the register back.
 My first draft of the START step wrote `CR2` twice: once with START and NBYTES, then `|=` with the address. Setting START begins the transfer immediately, so on hardware the first write would have started a transfer to address 0 before the second write arrived. Caught in review before it ran.
 
 Lesson: when one bit in a register triggers an action, build the whole value first and write it once.
+
+## A burst read that printed stack garbage
+
+While tidying `print_calibration` I deleted the wrong one of two `i2c_read_reg` calls and kept the one with `len = 1`. The output still printed 24 bytes: the first was right, the other 23 were whatever earlier calls had left on the stack, because a local array is not zeroed. The capture showed a one-byte read, `76 R | D2 | NACK | Stop`, which settled it.
+
+Before that, the version with both calls printed the *first* call's state, so `state 5` described a one-byte read while the 24 bytes came from a second call whose result was thrown away.
+
+Fix: one call, its state is the one printed, and the buffer is zero-initialised so a short read shows up as zeros instead of plausible-looking noise.
+
+## `= {0}` is a call to memset
+
+Zeroing the 24-byte calibration buffer with `uint8_t calibration[24] = {0};` broke the firmware link with `undefined reference to 'memset'`. GCC zeroes anything bigger than a few words by calling `memset`, and this firmware links no C library. It is the same failure as the `-O2` `.bss` loop above, but `-fno-tree-loop-distribute-patterns` does not help here, because that flag only stops GCC turning *loops* into calls; an initialiser was never a loop.
+
+GCC's documentation is explicit that even a freestanding build must provide `memcpy`, `memmove`, `memset` and `memcmp`, because the compiler emits calls to them on its own. So the fix is not to avoid `= {0}` but to supply them: `drivers/src/mem.c` has byte-loop `memset` and `memcpy`, in the firmware build only, since the host tests link the real libc. The flag above matters once more here: without it GCC could recognise the loop inside `memset` as a memset and compile it into a call to itself.
+
+Lesson: with `-nostdlib`, a handful of library functions are still part of the language as GCC implements it. Provide them once instead of dodging every construct that needs them. `memmove` and `memcmp` get added the first time something needs them.

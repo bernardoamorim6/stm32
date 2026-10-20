@@ -35,6 +35,7 @@ if(CMAKE_CROSSCOMPILING)
     drivers/src/usart.c
     drivers/src/ringbuffer.c
     drivers/src/i2c.c
+    drivers/src/mem.c
   )
   set_target_properties(firmware PROPERTIES SUFFIX ".elf")
 

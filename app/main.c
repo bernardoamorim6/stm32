@@ -9,10 +9,10 @@
 
 static void clock_init(void){
     uint32_t volatile *RCC_CR = (uint32_t volatile *)(0x40021000);
-    /* Clock in regular value of dividing by 4 aka 12MHz frequency */
+    /* HSIDIV = ÷4, the reset value, written anyway: 48 MHz / 4 = 12 MHz */
     *RCC_CR = insert(*RCC_CR, 0b010, 11, 3);
-    /* Set HSITRIM to a lower value than 64 in order to improve frequecny from 100.5 to 99.94Hz,
-    This is specific to this chip and could require a different value on another chip */
+    /* HSITRIM 62 instead of 64 took the 100 Hz test blink from +0.5% to -0.06%.
+       Measured on this chip, another one may need a different value. */
     uint32_t volatile *RCC_ICSCR = (uint32_t volatile *)(0x40021000 + 0x04);
     *RCC_ICSCR = insert(*RCC_ICSCR, 62, 8, 7);
 
@@ -63,6 +63,7 @@ static void print_hex(uint8_t value) {
     uart_write_byte(USART2, low_nibble);
 }
 
+/* The i2c_state_t as one digit: 5 is DONE, 6 a NACK on the address, 9 a timeout */
 static void print_state(i2c_state_t st) {
     uart_write_string(USART2, " state ");
     uart_write_byte(USART2, '0' + st);
@@ -87,12 +88,29 @@ static void i2c_bus_scan(void) {
     uart_write_string(USART2, "scan done\r\n");
 }
 
+/* An answer at an address only proves something is there; the ID says what */
 static void print_chip_id(const char *name, uint8_t addr, uint8_t reg) {
     uint8_t id = 0;
     i2c_state_t st = i2c_read_reg(I2C1, addr, reg, &id, 1);
     uart_write_string(USART2, name);
     uart_write_string(USART2, " id ");
     print_hex(id);
+    print_state(st);
+    uart_write_string(USART2, "\r\n");
+}
+
+/* 0x88 to 0x9F in one read: the BMP280 advances its register pointer by itself.
+   Zeroed, so a short read shows up as zeros rather than old stack contents. */
+static void print_calibration(void){
+    uint8_t calibration[24] = {0};
+    i2c_state_t st = i2c_read_reg(I2C1, 0x76, 0x88, calibration, sizeof(calibration));
+    uart_write_string(USART2, "calibration: ");
+    for (unsigned long c = 0; c < sizeof(calibration); c++) {
+        if (c > 0) {
+            uart_write_string(USART2, " ");
+        }
+        print_hex(calibration[c]);
+    }
     print_state(st);
     uart_write_string(USART2, "\r\n");
 }
@@ -123,6 +141,7 @@ int main(void) {
     i2c_bus_scan();
     print_chip_id("bmp280", 0x76, 0xD0);    /* expect 0x60 for a BME280, 0x58 for a BMP280 */
     print_chip_id("mpu6050", 0x68, 0x75);   /* expect 0x68 */
+    print_calibration();
 
     uart_write_string(USART2, "echo ready\r\n");
     while (1) {

@@ -12,7 +12,7 @@ I did use ST's debugger nad flashing tools, I only wanted to use hand written in
 - [One UART bit measured at 8.625 µs](#the-independent-measurement) against 8.667 predicted, with an honest note on why the analyser cannot resolve the difference
 - [An interrupt handler that was 2.3x over its time budget](#measured-the-isr-was-too-slow-before-it-was-wrong), found by counting instructions against the 86.8 µs byte time rather than guessing at a race
 - [A test suite checked against deliberately broken code](#testing-a-driver-without-hardware), because passing tests only prove the tests run
-- [One I²C register read on the wire](#on-the-wire), decoded byte for byte against the state machine that drives it, with the clock measured over 1137 cycles
+- [One I²C register read on the wire](#on-the-wire), decoded byte for byte against the state machine that drives it, with the clock measured over 1381 cycles
 - [A C++ register template that compiles to the same bytes as the C](#the-c17-layer-checked-at-compile-time-free-at-run-time), while rejecting out-of-range writes at compile time
 
 ---
@@ -49,7 +49,7 @@ This is a work in progress. What follows is what actually runs and is tested, no
 
 **I²C controller** (`drivers/src/i2c.c`) A register read (write the register number, repeated START, read `len` bytes) as a non-blocking state machine. `i2c_step` reads `ISR` once, takes at most one action and returns, checking bus errors first, then NACK, then the flag its state is waiting for, then the timeout. Time comes in as an argument instead of being read inside, so the timeout is testable on the host, including across the 32-bit tick wrap. A NACK does not end the transfer on the spot: the peripheral sends STOP by itself, so the machine waits for `STOPF` and then reports which byte was refused. `i2c_read_reg` is the blocking wrapper, with a 30 ms budget against a worst case of about 23 ms for a 255-byte read at 100 kHz. `TIMINGR` is `0x30420F13` from RM0490's table for 100 kHz from a 16 MHz kernel clock, which is why I2C1 runs from HSIKER (16 MHz) rather than the 12 MHz PCLK. Covered by 27 host tests.
 
-Verified on the board: a scan of every 7-bit address finds the MPU-6050 at `0x68` and the pressure sensor at `0x76`. Reading their chip ID registers returns `0x68` for the MPU-6050 and **`0x58`** for the other, which is a BMP280, not the BME280 (`0x60`) the board was sold as. So the sensor driver targets the BMP280: the same temperature and pressure maths, no humidity.
+Verified on the board: a scan of every 7-bit address finds the MPU-6050 at `0x68` and the pressure sensor at `0x76`. Reading their chip ID registers returns `0x68` for the MPU-6050 and **`0x58`** for the other, which is a BMP280, not the BME280 (`0x60`) the board was sold as. So the sensor driver targets the BMP280: the same temperature and pressure maths, no humidity. A 24-byte burst read of its factory calibration block returns values matching Bosch's datasheet example exactly in five of the twelve coefficients, which a misordered or shifted byte could not do.
 
 **Clock tree** The reset clock path is documented end to end in
 [`docs/NOTES.md`](docs/NOTES.md): HSI48 (48 MHz) -> `HSIDIV` ÷4 -> HSISYS -> `SW` mux ->
@@ -62,7 +62,7 @@ The scope below is the plan, not a promise, it gets revised as I go, and this se
 **C layer (C17), remaining:**
 
 - A `printf`-style formatter over the UART. Output is currently raw bytes and strings only.
-- Burst reads on hardware (the state machine already handles up to 255 bytes, tested on the host only), and bus recovery for a target holding SDA low
+- Bus recovery for a target holding SDA low
 - BMP280 driver including the compensation maths, host-tested against known values
 - SSD1306 as a second address on the same bus. Enough to prove addressing and capture two devices sharing a bus, no display driver
 
@@ -298,16 +298,17 @@ The error path, from the bus scan, where nobody answers at `0x74`. The NACK is f
 
 ![NACK on an empty address](images/i2c-nack.png)
 
-Measured from the saved capture ([`captures/i2c-boot-scan-and-ids.sr`](captures/i2c-boot-scan-and-ids.sr), opens in PulseView):
+Measured from the saved capture of the whole boot sequence ([`captures/i2c-boot-scan-ids-calibration.sr`](captures/i2c-boot-scan-ids-calibration.sr), opens in PulseView):
 
 | | Measured | From `TIMINGR` |
 |---|---|---|
-| SCL period, mean of 1137 cycles | **9.66 µs, 103.5 kHz** | |
+| SCL period, mean of 1381 cycles | **9.66 µs, 103.5 kHz** | |
 | SCL high | 4.35 µs | `SCLH`: 4.0 µs |
 | SCL low | 5.32 µs | `SCLL`: 5.0 µs |
 | One chip ID read, START to STOP | 381 µs | |
-| One NACKed address in the scan | 106 µs, then 23 µs of software before the next | |
-| The whole scan, `0x08` to `0x77` | about 14.4 ms | |
+| One NACKed address in the scan | 101 µs, then 21 µs of software before the next | |
+| The whole scan, `0x08` to `0x77` | 14.4 ms | |
+| 24-byte calibration burst, START to STOP | 2371 µs | |
 
 Each half of the clock runs about 0.3 µs longer than `TIMINGR` asks for. That is expected: the peripheral starts counting `SCLH` only once it sees SCL actually high, so the rise time through the pull-ups and its input synchronisation are added to every half period. The sample rate limits a single period to 0.25 µs steps, which is why one cursor reading gave 9.75 µs (102.6 kHz); the mean over the whole capture is the better number.
 
@@ -318,6 +319,14 @@ The capture also shows the controller waiting for the software. After each ACK t
 ![MPU-6050 chip ID read](images/i2c-mpu6050-id-read.png)
 
 The extra 9 µs is most likely the UART interrupt sending the scan results at that moment. The bus tolerates it because the controller owns the clock: a target only samples on a clock edge, so a late edge is a slower bit, never a wrong one. That is a real difference from the UART, whose receiver cannot pause the sender: software that is late there loses data, which is exactly what the [slow ISR](#measured-the-isr-was-too-slow-before-it-was-wrong) did.
+
+### A burst read
+
+The BMP280's 24 calibration bytes come back in one transfer: one register number, then `NBYTES = 24`, while the sensor advances its own register pointer after each byte. The end of it:
+
+![End of the 24-byte calibration burst](images/i2c-bmp280-calibration-end.png)
+
+Every byte is ACKed by the controller except the last, which gets the NACK that tells the target to stop sending, then the STOP. Between the data bytes there is no stretching at all, unlike after the address: `RXDR` is double buffered against the shift register, so the peripheral can receive the next byte while `i2c_step` collects the last one, and the software is well inside the 87 µs that gives it. The 24 bytes plus the three header bytes take 27 × 9 clocks × 9.66 µs = 2347 µs, and the measured 2371 µs leaves about 24 µs for START, repeated START and STOP.
 
 ## The C++17 layer: checked at compile time, free at run time
 
@@ -378,7 +387,7 @@ Current firmware size:
 
 ```
    text    data     bss     dec     hex
-   2408       0     148    2556     9fc
+   2592       0     148    2740     ab4
 ```
 
 ---
@@ -443,7 +452,7 @@ What this should show, and why it matters:
 ```
 app/                 application entry point
 drivers/include/     C headers (bitops.h, stm32c031_regs.h, gpio.h, systick.h, usart.h, i2c.h, ringbuffer.h, critical.h)
-drivers/src/         C sources (startup.c, systick.c, gpio.c, usart.c, i2c.c, ringbuffer.c)
+drivers/src/         C sources (startup.c, systick.c, gpio.c, usart.c, i2c.c, ringbuffer.c, mem.c)
 hal/include/         C++17 register layer (reg.hpp)
 bench/               reproducible size comparisons (bench/gpio_mode/run.sh)
 tests/               GoogleTest suites, host-only
