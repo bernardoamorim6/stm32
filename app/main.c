@@ -154,6 +154,30 @@ static void print_calibration(void){
     uart_write_string(USART2, "\r\n");
 }
 
+static void print_measurement(void){
+    i2c_state_t st = i2c_write_reg(I2C1, 0x76, 0xF4, 0x25);
+    uart_write_string(USART2, "write ctrl_meas");
+    print_state(st);
+    uart_write_string(USART2, "\r\n");
+    delay_ms(10);
+    uint8_t ctrl_meas = 0;
+    i2c_read_reg(I2C1, 0x76, 0xF4, &ctrl_meas, 1);
+    uart_write_string(USART2, "ctrl_meas: ");
+    print_hex(ctrl_meas);
+    uart_write_string(USART2,"\r\n");
+    uint8_t data[6] = {0};
+    st = i2c_read_reg(I2C1, 0x76, 0xF7, data, sizeof(data));
+    uart_write_string(USART2, "data: ");
+    for (unsigned long c = 0; c < sizeof(data); c++) {
+        if (c > 0) {
+            uart_write_string(USART2, " ");
+        }
+        print_hex(data[c]);
+    }
+    print_state(st);
+    uart_write_string(USART2, "\r\n");
+}
+
 /* Neither call blocks on the wire, so the button stays responsive. */
 static void echo_one_byte(void) {
     uint8_t byte;
@@ -181,6 +205,7 @@ int main(void) {
     print_chip_id("bmp280", 0x76, 0xD0);    /* expect 0x60 for a BME280, 0x58 for a BMP280 */
     print_chip_id("mpu6050", 0x68, 0x75);   /* expect 0x68 */
     print_calibration();
+    print_measurement();
 
     uart_write_string(USART2, "echo ready\r\n");
     while (1) {
