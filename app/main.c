@@ -63,10 +63,49 @@ static void print_hex(uint8_t value) {
     uart_write_byte(USART2, low_nibble);
 }
 
-/* The i2c_state_t as one digit: 5 is DONE, 6 a NACK on the address, 9 a timeout */
+/* The i2c_state_t, prints a string with the state name */
 static void print_state(i2c_state_t st) {
     uart_write_string(USART2, " state ");
-    uart_write_byte(USART2, '0' + st);
+    switch (st) {
+        case I2C_START_WRITE:
+            uart_write_string(USART2, "START_WRITE");
+            break;
+        case I2C_WAIT_TXIS:
+            uart_write_string(USART2, "WAIT_TXIS");
+            break;
+        case I2C_WAIT_TC:
+            uart_write_string(USART2, "WAIT_TC");
+            break;
+        case I2C_WAIT_RXNE:
+            uart_write_string(USART2, "WAIT_RXNE");
+            break;
+        case I2C_WAIT_STOPF:
+            uart_write_string(USART2, "WAIT_STOPF");
+            break;
+        case I2C_WAIT_TXIS_REG:
+            uart_write_string(USART2, "WAIT_TXIS_REG");
+            break;
+        case I2C_WAIT_TXIS_VALUE:
+            uart_write_string(USART2, "WAIT_TXIS_VALUE");
+            break;
+        case I2C_DONE:
+            uart_write_string(USART2, "DONE");
+            break;
+        case I2C_ERR_NACK_ADDR:
+            uart_write_string(USART2, "ERR_NACK_ADDR");
+            break;
+        case I2C_ERR_NACK_DATA:
+            uart_write_string(USART2, "ERR_NACK_DATA");
+            break;
+        case I2C_ERR_BUS:
+            uart_write_string(USART2, "ERR_BUS");
+            break;
+        case I2C_ERR_TIMEOUT:
+            uart_write_string(USART2, "ERR_TIMEOUT");
+            break;
+        default:
+            break;
+    }
 }
 
 /* Every valid 7-bit address. A NACK means nobody is there; anything other

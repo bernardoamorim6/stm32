@@ -761,6 +761,101 @@ On the wire there is no clock stretching between the data bytes. `RXDR` is doubl
 
 The textbook scan sends only the address and checks for an ACK. My state machine has no zero-length transfer, so the scan does a one-byte read of register `0x00` instead. That writes a register pointer to every device that answers, which is harmless for these two sensors but not guaranteed to be for every device.
 
+# BMP280
+
+From the Bosch datasheet, BST-BMP280-DS001 rev 1.26 (in `docs/`, not tracked). Section numbers refer to that revision.
+
+## Registers (chapter 4)
+
+**1. Raw readings.** Both are 20 bits, split over three registers, most significant byte first. Pressure is at `0xF7` to `0xF9`, temperature at `0xFA` to `0xFC`:
+
+| Register | Name | Holds |
+|---|---|---|
+| 0xF7 | press_msb | up[19:12] |
+| 0xF8 | press_lsb | up[11:4] |
+| 0xF9 | press_xlsb (bits 7:4) | up[3:0] |
+| 0xFA | temp_msb | ut[19:12] |
+| 0xFB | temp_lsb | ut[11:4] |
+| 0xFC | temp_xlsb (bits 7:4) | ut[3:0] |
+
+Only the top 4 bits of each xlsb register are data. Putting a reading back together:
+
+```c
+raw = ((uint32_t)msb << 12) | ((uint32_t)lsb << 4) | (xlsb >> 4);
+```
+
+The datasheet's register descriptions say `press_xlsb` depends on *temperature* resolution and `temp_xlsb` on *pressure* resolution. That is swapped: section 3.3 says each oversampling step adds a bit to its own measurement's xlsb register.
+
+**2. Chip ID and calibration.** `id` is `0xD0` and reads `0x58` on a BMP280, as measured. Calibration is twelve 16-bit words at `0x88` to `0x9F`, low byte first (Table 17). `0xA0`/`0xA1` are listed in the block but reserved, so the 24-byte read already gets everything.
+
+**3. Starting a measurement.** `ctrl_meas` at `0xF4`: `osrs_t[2:0]` bits 7:5, `osrs_p[2:0]` bits 4:2, `mode[1:0]` bits 1:0. Writing a mode other than sleep starts measuring.
+
+**4. `config` at `0xF5`.** Rate, filter and interface options: `t_sb[2:0]` bits 7:5 (standby time between measurements in normal mode), `filter[2:0]` bits 4:2 (IIR filter time constant), bit 1 reserved, `spi3w_en` bit 0 (3-wire SPI, stays 0 for I²C). Writes in normal mode may be ignored, so write it while in sleep mode.
+
+**5. Soft reset.** Write `0xB6` to `reset` at `0xE0`. It runs the complete power-on reset; any other value does nothing, and the register always reads `0x00`.
+
+## Operation (chapter 3)
+
+**6. Power modes.** Sleep (`00`), forced (`01` or `10`) and normal (`11`), in `mode[1:0]`. After power-up the chip is in sleep: registers can be read and written, but nothing is measured. The data registers then hold their reset values, `0x80 0x00 0x00`, which assemble to the 20-bit value `0x80000`: the same value a skipped measurement reports. A driver that reads `0x80000` has not started a measurement.
+
+**7. Oversampling.** The chip takes several samples and combines them. Each step (×1, ×2, ×4, ×8, ×16) reduces noise and adds one bit of resolution, from 16 bits at ×1 to 20 bits at ×16. "Skipped" (`000`) means no measurement at all, and the output is set to `0x80000`.
+
+**8. Timing.** One measurement takes 5.5 ms typical at the lowest setting up to 37.5 ms typical (43.2 ms max) at the highest (Table 13). Standby time does not change that; it sets the gap between measurements in normal mode, so it sets the rate. To know a measurement has finished: `measuring` (bit 3 of `status`, `0xF3`) is 1 while a conversion runs and drops to 0 once results are in the data registers. In forced mode the chip also returns `mode` to sleep when it is done. Bit 0, `im_update`, is set while calibration data is copied from NVM.
+
+**9. Read the data in one burst.** `0xF7` to `0xFC`, six bytes. During a burst read the data registers are shadowed, so a measurement that finishes mid-read cannot replace some bytes and not others. Read one at a time and the bytes can come from two different measurements (section 3.10).
+
+## Compensation (3.11, 3.12, appendix 8)
+
+**10. Units.** The integer formulas return integers with an implied scale. Temperature is in 0.01 °C: `5123` means 51.23 °C. Pressure from the 32-bit version (8.2) is in Pa, so `96386` is 96386 Pa. The 64-bit version (3.11.3) returns Pa in Q24.8, so divide by 256.
+
+**11. `t_fine`.** A fine-resolution temperature value that the temperature function computes and the pressure function needs. That is why temperature must be compensated first, every time.
+
+**12. Which version.** The 32-bit fixed point formula in appendix 8.2. The reasons:
+- No FPU, so floating point is emulated in software (Table 16: about 5400 cycles for pressure on a Cortex-M3).
+- The 64-bit version needs 64-bit multiplies. The M0+ `MULS` only gives a 32-bit result, so every 64-bit multiply is a libgcc call. Table 16 gives about 1400 cycles for 64-bit pressure against about 112 for 32-bit, and that is measured on an M3, which is faster.
+- The cost of 8.2 is accuracy: typically 1 Pa (1 sigma), about 8 cm of altitude. Fine for this project.
+
+**13. Worked example: section 3.12, page 23.** A figure, not text, so searching the PDF does not find it. Calibration:
+
+| dig_T1 | dig_T2 | dig_T3 | dig_P1 | dig_P2 | dig_P3 | dig_P4 | dig_P5 | dig_P6 | dig_P7 | dig_P8 | dig_P9 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 27504 | 26435 | -1000 | 36477 | -10685 | 3024 | 2855 | 140 | -7 | 15500 | -14600 | 6000 |
+
+Raw readings: **adc_T = 519888**, **adc_P = 415148**. The figure's address column puts UT at `0xF7` and UP at `0xFA`, which is backwards against the memory map; the names and values are what count.
+
+Expected: `t_fine = 128422`, temperature **2508** (25.08 °C), pressure **100653 Pa** from the 32-bit integer version (100653.27 in floating point). Footnote (\*\*) says the integer results may deviate slightly from the figure because of rounding, so a test either checks against a value computed with the exact datasheet code or allows a small tolerance.
+
+## The bus (chapter 5)
+
+**14. A register write** (5.2.1): one transfer, no repeated START, no read phase.
+
+```
+Start | 76 W | ACK | register | ACK | value | ACK | Stop
+```
+
+On the wire the address byte is `0xEC`. Writing several registers in one transfer does **not** auto-increment, unlike reads: the controller sends register/value pairs (`reg1 | val1 | reg2 | val2 ...`).
+
+To start a measurement: write `ctrl_meas` (`0xF4`) with the oversampling bits and `mode = 01` (forced).
+
+How a write goes:
+Which states a single-register write goes through.
+START_WRITE, WAIT_TXIS, WAIT_TXIS, WAIT_STOPF, DONE
+What CR2 contains for it (NBYTES, AUTOEND, RD_WRN).
+In CR2: NBYTES = 2; AUTOEND=1, RD_WRN = 0
+
+How a NACK maps to an error at each point: 
+on the address: WAIT_TXIS, first time: ERR_NACK_ADDR
+on the register byte: WAIT_TXIS, second time: ERR_NACK_DATA
+on the value byte: in WAIT_STOPF: ERR_NACK_DATA
+
+Whether you reuse i2c_step (with something in i2c_xfer_t saying "write") or write a separate function, with one reason.
+I think we should not reuse the function, it will becme hard for anyone else to read and hard to fix, and the read's tested behaviour stays untouched, and each function reads top to bottom as one bus sequence.
+We will also use sepparate states for the two TXIS waits.
+
+ctrl_meas: forced mode, 1x oversampling for temprature and pressure.
+Bits: 001 001 01
+Hex: 0x25
+
 
 # How the tests work, for studying
 
