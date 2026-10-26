@@ -823,7 +823,89 @@ The datasheet's register descriptions say `press_xlsb` depends on *temperature* 
 
 Raw readings: **adc_T = 519888**, **adc_P = 415148**. The figure's address column puts UT at `0xF7` and UP at `0xFA`, which is backwards against the memory map; the names and values are what count.
 
-Expected: `t_fine = 128422`, temperature **2508** (25.08 °C), pressure **100653 Pa** from the 32-bit integer version (100653.27 in floating point). Footnote (\*\*) says the integer results may deviate slightly from the figure because of rounding, so a test either checks against a value computed with the exact datasheet code or allows a small tolerance.
+Expected: `t_fine = 128422`, temperature **2508** (25.08 °C), pressure **100653.27 Pa** in floating point. The figure also lists an "int32 result" of 100653, but compiling the appendix 8.2 code itself gives **100656**. Footnote (\*\*) warns of exactly this: the integer results deviate slightly from the figure. So the test expects 100656, the value the real code produces, and that value is checked against the floating-point result separately.
+
+## Compensation design
+
+The design for `drivers/src/bmp280.c`, worked out before writing it.
+
+**C1. Calibration bytes to values.** Each `dig_` value is two bytes, low byte first (Table 17), so the second byte is shifted up 8 and ORed with the first:
+
+```c
+dig_T1 = (uint16_t)(((uint16_t)calib[1] << 8) | calib[0]);   /* unsigned */
+dig_P2 = (int16_t)(((uint16_t)calib[9] << 8) | calib[8]);    /* signed */
+```
+
+`dig_T1` and `dig_P1` are unsigned, the other ten are signed:
+
+| dig_T1 | dig_T2 | dig_T3 | dig_P1 | dig_P2 | dig_P3 | dig_P4 | dig_P5 | dig_P6 | dig_P7 | dig_P8 | dig_P9 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| uint16 | int16 | int16 | uint16 | int16 | int16 | int16 | int16 | int16 | int16 | int16 | int16 |
+
+The type is where the sign comes from. The bytes of `dig_P2` are `0x5E 0xD6`, so `0xD65E`: stored in a `uint16_t` that is 54878, stored in an `int16_t` it is -10658, the correct value. The `(int16_t)` cast is what makes the top bit mean "negative".
+
+**C2. Raw readings from the 6 measurement bytes.** No calibration is involved: these only put the 20 bits back together. `data[0..2]` are pressure (`0xF7` to `0xF9`), `data[3..5]` temperature (`0xFA` to `0xFC`):
+
+```c
+adc_P = ((uint32_t)data[0] << 12) | ((uint32_t)data[1] << 4) | ((uint32_t)data[2] >> 4);
+adc_T = ((uint32_t)data[3] << 12) | ((uint32_t)data[4] << 4) | ((uint32_t)data[5] >> 4);
+```
+
+Derived from Tables 24 and 25 (4.3.6/4.3.7): msb holds bits 19:12, lsb 11:4, and xlsb bits 7:4 hold 3:0. Each shift is where the bits belong minus where they sit in the byte. The datasheet's pointer to a readout chapter says "chapter0", a broken reference. Checked on my reading: `0x50 0x93 0x00` is 330032, `0x7E 0x8A 0x00` is 518304.
+
+The 8.2 functions take these as signed 32-bit (`int32_t`) even though they are always positive. A 20-bit value is at most 1048575, far inside both `int32_t` and `uint32_t`, so the conversion is safe.
+
+**C3. `t_fine` without a global.** Globals are not banned in a driver (`usart.c` has its static rings). The problem is the hidden dependency: the pressure function silently uses whatever `t_fine` the last temperature call left behind. Call it first, or after a temperature reading from an older measurement, and it returns a wrong pressure with no error. Two sensors would share one `t_fine`, and tests would pass or fail depending on the order they run in.
+
+The fix is to make the dependency visible in the signatures: the temperature function hands `t_fine` back through a pointer, and the pressure function takes it as a parameter. A caller cannot get a pressure without first having a `t_fine`.
+
+**C4. The driver's functions.** The rule is to keep fetching bytes (I²C) apart from doing maths on them, so everything with real logic in it can be tested on the host with numbers in and numbers out:
+
+| Function | I²C or maths | Host test |
+|---|---|---|
+| `bmp280_read_id(i2c, &id)` | I²C | board only |
+| `bmp280_read_calib(i2c, &cal)`: read the 24 bytes, then parse | I²C, then maths | the parse part |
+| `bmp280_parse_calib(bytes, &cal)` | maths | yes, with my chip's real bytes |
+| `bmp280_start_forced(i2c)`: write `ctrl_meas` | I²C | board only |
+| `bmp280_read_raw(i2c, &adc_T, &adc_P)`: burst read, then assemble | I²C, then maths | the assemble part |
+| `bmp280_compensate_T(&cal, adc_T, &t_fine)` | maths | yes |
+| `bmp280_compensate_P(&cal, adc_P, t_fine)` | maths | yes |
+
+The I²C functions return the `i2c_state_t` of their transfer so the caller can see a failure; the maths functions return their result.
+
+**C5. The calibration struct.**
+
+```c
+typedef struct {
+    uint16_t dig_T1;
+    int16_t  dig_T2;
+    int16_t  dig_T3;
+    uint16_t dig_P1;
+    int16_t  dig_P2;
+    int16_t  dig_P3;
+    int16_t  dig_P4;
+    int16_t  dig_P5;
+    int16_t  dig_P6;
+    int16_t  dig_P7;
+    int16_t  dig_P8;
+    int16_t  dig_P9;
+} bmp280_calib_t;
+```
+
+**C6. What the tests expect.** All results in the integer units: temperature in 0.01 °C, pressure in Pa.
+
+| Input | `t_fine` | Temperature | Pressure | Floating point (8.1) |
+|---|---|---|---|---|
+| Datasheet example (3.12), adc_T 519888, adc_P 415148 | 128422 | 2508 | 100656 | 25.08 °C, 100653.26 Pa |
+| My chip, adc_T 518304, adc_P 330032 | 109746 | 2143 | 102137 | 21.43 °C, 102136.06 Pa |
+
+The integer column for my chip has no published reference, so it cannot come from my own integer code, which would only test the code against itself. The independent check is the floating-point version from appendix 8.1, a different formula: the test computes it on the host and requires the integer result to agree within 1 (0.01 °C) for temperature and 4 Pa for pressure. 4, not 1: the datasheet's own example is 2.7 Pa apart between the two versions (100656 against 100653.26), and 8.2 only claims about 1 Pa as one standard deviation. Plus a parse test: my 24 calibration bytes must produce exactly the 12 values in the BMP280 calibration table above.
+
+**C7. Signed integer behaviour.**
+- Right-shifting a negative signed integer is implementation-defined in C. GCC documents that it sign-extends (fills with 1s, an arithmetic shift), on ARM as everywhere, so with GCC the 8.2 code behaves as Bosch intended.
+- The division: just before it the code checks `if (var1 == 0) return 0;`, so a corrupt calibration cannot divide by zero. Returning 0 is the "no reading" value, which a caller should treat as an error.
+- It is split by `if (p < 0x80000000)` because `p << 1` would overflow a 32-bit unsigned once its top bit is set. Below that limit, shifting first keeps one more bit of precision; above it, divide first and double afterwards.
+- The M0+ has no divide instruction, so both divisions become calls to `__aeabi_uidiv` in libgcc, the same routine that broke the link the first time `uart_init` divided.
 
 ## The bus (chapter 5)
 

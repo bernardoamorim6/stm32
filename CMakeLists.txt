@@ -35,6 +35,7 @@ if(CMAKE_CROSSCOMPILING)
     drivers/src/usart.c
     drivers/src/ringbuffer.c
     drivers/src/i2c.c
+    drivers/src/bmp280.c
     drivers/src/mem.c
   )
   set_target_properties(firmware PROPERTIES SUFFIX ".elf")
@@ -137,7 +138,17 @@ else()
     GTest::gtest_main
   )
 
-  foreach(t bitops_tests gpio_tests ringbuffer_tests reg_tests i2c_tests)
+  add_executable(
+    bmp280_tests
+    tests/bmp280_tests.cpp
+    drivers/src/bmp280.c
+  )
+  target_link_libraries(
+    bmp280_tests
+    GTest::gtest_main
+  )
+
+  foreach(t bitops_tests gpio_tests ringbuffer_tests reg_tests i2c_tests bmp280_tests)
     target_compile_options(${t} PRIVATE ${PROJECT_WARNINGS})
   endforeach()
 
@@ -147,6 +158,7 @@ else()
   gtest_discover_tests(ringbuffer_tests)
   gtest_discover_tests(reg_tests)
   gtest_discover_tests(i2c_tests)
+  gtest_discover_tests(bmp280_tests)
 
   # A test that passes only if the source FAILS to compile, and with the
   # expected static_assert message, so a typo cannot make it pass by accident.
