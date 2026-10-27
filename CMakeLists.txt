@@ -142,9 +142,12 @@ else()
     bmp280_tests
     tests/bmp280_tests.cpp
     drivers/src/bmp280.c
+    drivers/src/i2c.c
+    drivers/src/systick.c
   )
   target_link_libraries(
     bmp280_tests
+    bitops
     GTest::gtest_main
   )
 

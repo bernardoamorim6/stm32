@@ -1,9 +1,10 @@
 #include "../drivers/include/bitops.h"
 #include "../drivers/include/systick.h"
-#include "gpio.h"
-#include "i2c.h"
-#include "usart.h"
-#include "stm32c031_regs.h"
+#include "../drivers/include/gpio.h"
+#include "../drivers/include/i2c.h"
+#include "../drivers/include/usart.h"
+#include "../drivers/include/bmp280.h"
+#include "../drivers/include/stm32c031_regs.h"
 #include <stdint.h>
 
 
@@ -61,6 +62,33 @@ static void print_hex(uint8_t value) {
     uart_write_byte(USART2, 'x');
     uart_write_byte(USART2, high_nibble);
     uart_write_byte(USART2, low_nibble);
+}
+
+/* A value in hundredths as a decimal, so 2143 prints as 21.43. Digits come out
+   lowest first, so they are collected and sent in reverse. */
+static void print_hundredths(int32_t value){
+    char digits[10];
+    if (value < 0) {
+        uart_write_byte(USART2, '-');
+    }
+    uint32_t n = (value < 0) ? (0U - (uint32_t)value) : (uint32_t)value;
+    uint32_t whole = n / 100;
+    uint32_t frac = n % 100;
+
+    int i = 0;
+    do {
+        digits[i] = (char)('0' + (whole % 10));
+        whole /= 10;
+        i++;
+    } while (whole > 0);
+
+    while (i > 0) {
+        i--;
+        uart_write_byte(USART2, digits[i]);
+    }
+    uart_write_byte(USART2, '.');
+    uart_write_byte(USART2, (char)('0' + (frac / 10)));
+    uart_write_byte(USART2, (char)('0' + (frac % 10)));
 }
 
 /* The i2c_state_t, prints a string with the state name */
@@ -138,44 +166,45 @@ static void print_chip_id(const char *name, uint8_t addr, uint8_t reg) {
     uart_write_string(USART2, "\r\n");
 }
 
-/* 0x88 to 0x9F in one read: the BMP280 advances its register pointer by itself.
-   Zeroed, so a short read shows up as zeros rather than old stack contents. */
-static void print_calibration(void){
-    uint8_t calibration[24] = {0};
-    i2c_state_t st = i2c_read_reg(I2C1, 0x76, 0x88, calibration, sizeof(calibration));
-    uart_write_string(USART2, "calibration: ");
-    for (unsigned long c = 0; c < sizeof(calibration); c++) {
-        if (c > 0) {
-            uart_write_string(USART2, " ");
-        }
-        print_hex(calibration[c]);
-    }
-    print_state(st);
-    uart_write_string(USART2, "\r\n");
-}
+/* One forced measurement. Any bus step that does not end in DONE is reported
+   by name, and nothing is printed from data that was never written. */
+static void print_bmp280_reading(void) {
+    bmp280_calib_t cal = {0};
+    int32_t adc_T = 0;
+    int32_t adc_P = 0;
+    int32_t t_fine = 0;
 
-static void print_measurement(void){
-    i2c_state_t st = i2c_write_reg(I2C1, 0x76, 0xF4, 0x25);
-    uart_write_string(USART2, "write ctrl_meas");
-    print_state(st);
-    uart_write_string(USART2, "\r\n");
-    delay_ms(10);
-    uint8_t ctrl_meas = 0;
-    i2c_read_reg(I2C1, 0x76, 0xF4, &ctrl_meas, 1);
-    uart_write_string(USART2, "ctrl_meas: ");
-    print_hex(ctrl_meas);
-    uart_write_string(USART2,"\r\n");
-    uint8_t data[6] = {0};
-    st = i2c_read_reg(I2C1, 0x76, 0xF7, data, sizeof(data));
-    uart_write_string(USART2, "data: ");
-    for (unsigned long c = 0; c < sizeof(data); c++) {
-        if (c > 0) {
-            uart_write_string(USART2, " ");
-        }
-        print_hex(data[c]);
+    i2c_state_t st = bmp280_read_calib(I2C1, &cal);
+    if (st != I2C_DONE) {
+        uart_write_string(USART2, "bmp280 calibration failed");
+        print_state(st);
+        uart_write_string(USART2, "\r\n");
+        return;
     }
-    print_state(st);
-    uart_write_string(USART2, "\r\n");
+    st = bmp280_start_forced(I2C1);
+    if (st != I2C_DONE) {
+        uart_write_string(USART2, "bmp280 start failed");
+        print_state(st);
+        uart_write_string(USART2, "\r\n");
+        return;
+    }
+    delay_ms(10);   /* x1 oversampling takes 6.4 ms at most (datasheet Table 13) */
+    st = bmp280_read_raw(I2C1, &adc_T, &adc_P);
+    if (st != I2C_DONE) {
+        uart_write_string(USART2, "bmp280 read failed");
+        print_state(st);
+        uart_write_string(USART2, "\r\n");
+        return;
+    }
+
+    const int32_t celsius_x100 = bmp280_compensate_T(&cal, adc_T, &t_fine);
+    const uint32_t pascal = bmp280_compensate_P(&cal, adc_P, t_fine);
+    uart_write_string(USART2, "Temperature ");
+    print_hundredths(celsius_x100);
+    uart_write_string(USART2, " C\r\n");
+    uart_write_string(USART2, "Pressure ");
+    print_hundredths((int32_t)pascal);   /* Pa are hundredths of a hPa */
+    uart_write_string(USART2, " hPa\r\n");
 }
 
 /* Neither call blocks on the wire, so the button stays responsive. */
@@ -204,8 +233,7 @@ int main(void) {
     i2c_bus_scan();
     print_chip_id("bmp280", 0x76, 0xD0);    /* expect 0x60 for a BME280, 0x58 for a BMP280 */
     print_chip_id("mpu6050", 0x68, 0x75);   /* expect 0x68 */
-    print_calibration();
-    print_measurement();
+    print_bmp280_reading();
 
     uart_write_string(USART2, "echo ready\r\n");
     while (1) {

@@ -47,9 +47,11 @@ This is a work in progress. What follows is what actually runs and is tested, no
 
 **C++17 register layer** (`hal/include/reg.hpp`) A field's register, position and width are template parameters, so writing a value that does not fit, or declaring a field that runs past bit 31, fails to compile. Byte-for-byte identical machine code to the equivalent C. Covered by 10 host tests and 2 compile-time rejection tests. See [below](#the-c17-layer-checked-at-compile-time-free-at-run-time).
 
-**I²C controller** (`drivers/src/i2c.c`) A register read (write the register number, repeated START, read `len` bytes) as a non-blocking state machine. `i2c_step` reads `ISR` once, takes at most one action and returns, checking bus errors first, then NACK, then the flag its state is waiting for, then the timeout. Time comes in as an argument instead of being read inside, so the timeout is testable on the host, including across the 32-bit tick wrap. A NACK does not end the transfer on the spot: the peripheral sends STOP by itself, so the machine waits for `STOPF` and then reports which byte was refused. `i2c_read_reg` is the blocking wrapper, with a 30 ms budget against a worst case of about 23 ms for a 255-byte read at 100 kHz. `TIMINGR` is `0x30420F13` from RM0490's table for 100 kHz from a 16 MHz kernel clock, which is why I2C1 runs from HSIKER (16 MHz) rather than the 12 MHz PCLK. Covered by 27 host tests.
+**I²C controller** (`drivers/src/i2c.c`) Register reads and writes as two non-blocking state machines. A read writes the register number, issues a repeated START and reads `len` bytes; a write sends the register number and one value in a single transfer. `i2c_step_read` reads `ISR` once, takes at most one action and returns, checking bus errors first, then NACK, then the flag its state is waiting for, then the timeout. Time comes in as an argument instead of being read inside, so the timeout is testable on the host, including across the 32-bit tick wrap. A NACK does not end the transfer on the spot: the peripheral sends STOP by itself, so the machine waits for `STOPF` and then reports which byte was refused. `i2c_read_reg` and `i2c_write_reg` are the blocking wrappers, with a 30 ms budget against a worst case of about 23 ms for a 255-byte read at 100 kHz. `TIMINGR` is `0x30420F13` from RM0490's table for 100 kHz from a 16 MHz kernel clock, which is why I2C1 runs from HSIKER (16 MHz) rather than the 12 MHz PCLK. Covered by 38 host tests.
 
 Verified on the board: a scan of every 7-bit address finds the MPU-6050 at `0x68` and the pressure sensor at `0x76`. Reading their chip ID registers returns `0x68` for the MPU-6050 and **`0x58`** for the other, which is a BMP280, not the BME280 (`0x60`) the board was sold as. So the sensor driver targets the BMP280: the same temperature and pressure maths, no humidity. A 24-byte burst read of its factory calibration block returns values matching Bosch's datasheet example exactly in five of the twelve coefficients, which a misordered or shifted byte could not do.
+
+**BMP280 driver** (`drivers/src/bmp280.c`) Split into a bus side, which only moves bytes (chip ID, calibration, start a forced measurement, read the six data bytes), and a maths side with no hardware at all: parsing the calibration and the datasheet's 32-bit fixed point compensation (appendix 8.2), chosen because the M0+ has no FPU and turns every 64-bit multiply into a library call. The datasheet keeps an intermediate, `t_fine`, in a global that the temperature function writes and the pressure function silently reads; here it is handed back by the temperature function and passed into the pressure function, so a pressure can never be computed from a stale temperature. One real board reading, raw `0x7E8A0` and `0x50930`, compensates to **21.43 °C and 1021.37 hPa**. The maths is covered by 10 host tests, described [below](#testing-a-driver-without-hardware).
 
 **Clock tree** The reset clock path is documented end to end in
 [`docs/NOTES.md`](docs/NOTES.md): HSI48 (48 MHz) -> `HSIDIV` ÷4 -> HSISYS -> `SW` mux ->
@@ -63,8 +65,7 @@ The scope below is the plan, not a promise, it gets revised as I go, and this se
 
 - A `printf`-style formatter over the UART. Output is currently raw bytes and strings only.
 - Bus recovery for a target holding SDA low
-- BMP280 driver including the compensation maths, host-tested against known values
-- SSD1306 as a second address on the same bus. Enough to prove addressing and capture two devices sharing a bus, no display driver
+- SSD1306 OLED on the same I²C bus, showing the temperature and pressure
 
 **Host tests for the UART driver.** `uart_init` takes a pointer and a clock frequency, so it has the same testable shape as the GPIO driver, but no suite exists for it yet. The obvious cases are the `BRR` divisor for a few clock and baud combinations, and that `TE` and `UE` end up set without disturbing the framing fields.
 
@@ -250,7 +251,7 @@ The script reports when the first and last bytes arrived and prints an explicit 
 
 ## The I²C state machine
 
-One register read is three phases on the wire: write the register number, a repeated START, then read. `i2c_step` walks that sequence one flag at a time and never waits:
+One register read is three phases on the wire: write the register number, a repeated START, then read. `i2c_step_read` walks that sequence one flag at a time and never waits:
 
 ```mermaid
 stateDiagram-v2
@@ -284,7 +285,26 @@ Three decisions behind it:
 
 - **A NACK goes through `WAIT_STOPF`, not straight to an error.** After a NACK the peripheral sends STOP by itself, and returning before it finishes would let the next transfer start on a bus that is still busy. The error is remembered in the transfer's `end_state`, so the same state finishes both the success path and both NACK paths.
 - **The first write phase uses `AUTOEND=0`.** That makes the peripheral raise `TC` instead of sending STOP, which is what allows the repeated START into the read. The read phase uses `AUTOEND=1`, so the final STOP comes from hardware.
-- **Time is an input.** `i2c_step` takes `now_ms` rather than reading the tick itself, so every timeout path, including the 32-bit tick wrap, is tested on the host without waiting.
+- **Time is an input.** `i2c_step_read` takes `now_ms` rather than reading the tick itself, so every timeout path, including the 32-bit tick wrap, is tested on the host without waiting.
+
+### Writing a register
+
+A write is one transfer with no repeated START: address, register number, value, STOP. So `CR2` is written once, with `NBYTES = 2` and `AUTOEND = 1`, and the machine only ever waits for `TXIS` twice and then `STOPF`. It is a separate function, `i2c_step_write`, rather than a flag inside the read: each function reads top to bottom as one bus sequence, and the read's tested behaviour was never touched to add it.
+
+```mermaid
+stateDiagram-v2
+    [*] --> START_WRITE
+    START_WRITE --> WAIT_TXIS_REG : CR2 (addr, write, NBYTES=2, AUTOEND=1, START)
+    WAIT_TXIS_REG --> WAIT_TXIS_VALUE : TXIS / send register
+    WAIT_TXIS_VALUE --> WAIT_STOPF : TXIS / send value
+    WAIT_TXIS_REG --> WAIT_STOPF : NACKF / address refused
+    WAIT_TXIS_VALUE --> WAIT_STOPF : NACKF / register refused
+    WAIT_STOPF --> DONE : STOPF
+    WAIT_STOPF --> ERR_NACK_DATA : STOPF with NACKF / value refused
+    WAIT_STOPF --> ERR_NACK_ADDR : STOPF after an address NACK
+```
+
+The case worth a second look is a refused value byte. After writing the value there is no further `TXIS` to wait for, so the machine is already in `WAIT_STOPF` when the target answers. A NACK there arrives together with the `STOPF`, with no error recorded yet, and without a rule for it the transfer would report success for a write the sensor rejected. A read can never hit this, because there the final NACK is sent *by* the controller, and `NACKF` only flags NACKs it receives.
 
 ### On the wire
 
@@ -314,7 +334,7 @@ Each half of the clock runs about 0.3 µs longer than `TIMINGR` asks for. That i
 
 **103.5 kHz is slightly over Standard-mode's 100 kHz limit.** RM0490's value evidently assumes slower edges than this bus has, with short wires and the breakout boards' pull-ups. Both sensors support 400 kHz Fast-mode, so nothing misbehaves, but the honest description of this bus is "about 100 kHz", not "100 kHz". Adding one or two ticks to `SCLL` would bring it under the limit.
 
-The capture also shows the controller waiting for the software. After each ACK the peripheral holds SCL low until `i2c_step` has noticed the flag and written `TXDR` or `CR2`. After the address ACK that stretch lasted 3.6 µs longer than a normal clock in the BMP280 read, but 12.8 µs in the MPU-6050 read, visible as the gap before `Data write: 75`:
+The capture also shows the controller waiting for the software. After each ACK the peripheral holds SCL low until `i2c_step_read` has noticed the flag and written `TXDR` or `CR2`. After the address ACK that stretch lasted 3.6 µs longer than a normal clock in the BMP280 read, but 12.8 µs in the MPU-6050 read, visible as the gap before `Data write: 75`:
 
 ![MPU-6050 chip ID read](images/i2c-mpu6050-id-read.png)
 
@@ -326,7 +346,7 @@ The BMP280's 24 calibration bytes come back in one transfer: one register number
 
 ![End of the 24-byte calibration burst](images/i2c-bmp280-calibration-end.png)
 
-Every byte is ACKed by the controller except the last, which gets the NACK that tells the target to stop sending, then the STOP. Between the data bytes there is no stretching at all, unlike after the address: `RXDR` is double buffered against the shift register, so the peripheral can receive the next byte while `i2c_step` collects the last one, and the software is well inside the 87 µs that gives it. The 24 bytes plus the three header bytes take 27 × 9 clocks × 9.66 µs = 2347 µs, and the measured 2371 µs leaves about 24 µs for START, repeated START and STOP.
+Every byte is ACKed by the controller except the last, which gets the NACK that tells the target to stop sending, then the STOP. Between the data bytes there is no stretching at all, unlike after the address: `RXDR` is double buffered against the shift register, so the peripheral can receive the next byte while `i2c_step_read` collects the last one, and the software is well inside the 87 µs that gives it. The 24 bytes plus the three header bytes take 27 × 9 clocks × 9.66 µs = 2347 µs, and the measured 2371 µs leaves about 24 µs for START, repeated START and STOP.
 
 ## The C++17 layer: checked at compile time, free at run time
 
@@ -387,7 +407,7 @@ Current firmware size:
 
 ```
    text    data     bss     dec     hex
-   2592       0     148    2740     ab4
+   4200       0     148    4348    10fc
 ```
 
 ---
@@ -451,8 +471,8 @@ What this should show, and why it matters:
 
 ```
 app/                 application entry point
-drivers/include/     C headers (bitops.h, stm32c031_regs.h, gpio.h, systick.h, usart.h, i2c.h, ringbuffer.h, critical.h)
-drivers/src/         C sources (startup.c, systick.c, gpio.c, usart.c, i2c.c, ringbuffer.c, mem.c)
+drivers/include/     C headers (bitops.h, stm32c031_regs.h, gpio.h, systick.h, usart.h, i2c.h, bmp280.h, ringbuffer.h, critical.h)
+drivers/src/         C sources (startup.c, systick.c, gpio.c, usart.c, i2c.c, bmp280.c, ringbuffer.c, mem.c)
 hal/include/         C++17 register layer (reg.hpp)
 bench/               reproducible size comparisons (bench/gpio_mode/run.sh)
 tests/               GoogleTest suites, host-only
@@ -470,7 +490,7 @@ docs/                NOTES.md, the working log (reference PDFs are gitignored)
 
 ## Testing a driver without hardware
 
-95 GoogleTest cases and 2 compile-time rejection tests run on the host, with no board attached. That is possible because no driver function knows its own address:
+116 GoogleTest cases and 2 compile-time rejection tests run on the host, with no board attached. That is possible because no driver function knows its own address:
 
 ```c
 void gpio_set_mode(GPIO_Regs *port, uint32_t pin, gpio_mode_t mode);
@@ -499,9 +519,15 @@ The last row is the argument for writing failure-path tests at all. Only one cas
 
 ### The I²C state machine, and the bug the tests missed
 
-The I²C tests play the hardware: each one sets `ISR` to whatever the peripheral would be reporting, calls `i2c_step`, and checks both the state that comes back and what was written to `CR2`, `TXDR` and `ICR`. Every arrow of the state diagram has a test, plus the edges: a deadline exactly reached versus just exceeded, the tick counter wrapping mid-transfer, a bus error arriving together with the flag being waited for, and finished transfers writing nothing.
+The I²C tests play the hardware: each one sets `ISR` to whatever the peripheral would be reporting, calls `i2c_step_read`, and checks both the state that comes back and what was written to `CR2`, `TXDR` and `ICR`. Every arrow of the state diagram has a test, plus the edges: a deadline exactly reached versus just exceeded, the tick counter wrapping mid-transfer, a bus error arriving together with the flag being waited for, and finished transfers writing nothing.
 
-They still let one bug through. On the timeout path, `i2c_step` returned `I2C_ERR_TIMEOUT` without storing it, and every test only looked at the return value. The blocking wrapper loops on the stored state, so the first read on the board, with the pins not yet configured, hung forever instead of timing out. The fix was one line. The more useful change was to the test fixture, which now checks after every step that the returned state is the stored one. That turns one missed case into a property all 27 tests enforce, and it fails 5 of them against the original code.
+They still let one bug through. On the timeout path, `i2c_step_read` returned `I2C_ERR_TIMEOUT` without storing it, and every test only looked at the return value. The blocking wrapper loops on the stored state, so the first read on the board, with the pins not yet configured, hung forever instead of timing out. The fix was one line. The more useful change was to the test fixture, which now checks after every step that the returned state is the stored one. That turns one missed case into a property all 27 tests enforce, and it fails 5 of them against the original code.
+
+### The BMP280 maths, and a disagreement inside the datasheet
+
+The compensation has no hardware in it, so its tests are plain numbers in and numbers out. The datasheet's worked example is the obvious reference, and it contradicts itself: the figure prints 100653 Pa as the integer result, while compiling the integer code from the same datasheet gives **100656**. A footnote admits the integer results may deviate. So the tests expect what the published code actually produces, and a second, independent reference checks it: the datasheet's floating point formula, a different calculation, run on the host. The integer results must agree with it within 0.01 °C and 4 Pa, on the datasheet example, on my real reading, and on a reading below zero, where the signed arithmetic matters.
+
+The suite was checked against four broken copies of the driver. Doing the temperature in unsigned arithmetic, an easy slip since the raw readings are never negative, fails exactly one test: the below-zero one, the only input where an intermediate goes negative.
 
 ## CI
 

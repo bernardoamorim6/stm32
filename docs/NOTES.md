@@ -1049,7 +1049,7 @@ A test that has never failed has not shown it can. So for every suite I broke th
 ```cpp
 i2c_state_t step(uint32_t isr, uint32_t now = 0) {
     fake.ISR = isr;
-    return i2c_step(&fake, &x, now);
+    return i2c_step_read(&fake, &x, now);
 }
 ```
 
@@ -1065,7 +1065,7 @@ Each helper builds on the previous one, so every test that reaches a deep state 
 
 **3. Independent constants.** The test defines `TXIS = 1U << 1` and the rest itself, from RM0490, instead of using `I2C_ISR_TXIS` from `i2c.h`. If the header had a wrong bit position and the test used the same wrong value, the test would pass and the hardware would fail. Same reason the expected `CR2` values are hex worked out by hand rather than built with `insert()`.
 
-**4. Time is an input, so time can be tested.** `i2c_step` takes `now_ms` instead of reading the tick counter. That allows three tests that would be impossible against a real clock: exactly at the budget is not a timeout, one past it is, and the timeout still works when the 32-bit counter wraps from `0xFFFFFFFF` to `0`. That last one passes because the comparison uses unsigned subtraction, the same trick as `delay_ms`.
+**4. Time is an input, so time can be tested.** `i2c_step_read` takes `now_ms` instead of reading the tick counter. That allows three tests that would be impossible against a real clock: exactly at the budget is not a timeout, one past it is, and the timeout still works when the 32-bit counter wraps from `0xFFFFFFFF` to `0`. That last one passes because the comparison uses unsigned subtraction, the same trick as `delay_ms`.
 
 **5. Testing order and absence.** Some tests check which rule wins when two things are true at once: a bus error beats the flag being waited for, a flag that has arrived beats the timeout. Others check that something did **not** happen: after a NACK, `ICR` must still be zero, because nothing should be cleared before the STOP completes. Asserting absence is how you catch an implementation that does the right thing too early.
 
@@ -1079,6 +1079,27 @@ Each helper builds on the previous one, so every test that reaches a deep state 
 4. Write a test for a two-byte burst where the deadline passes between the first and second byte. Which state should it fail in?
 
 **Answers.** (1) A state machine can return the right state while still having acted, here by writing a byte early; the register check catches that. (2) Doing nothing is the correct behaviour for a terminal state; every happy-path and error test fails against the stub. (3) After a successful read the hardware sends no NACK, but if `NACKF` were set while in `WAIT_STOPF`, `ISR = NACKF | STOPF` should still end in `DONE`, because `end_state` was never changed. (4) In `WAIT_RXNE`: step the first `RXNE` at an early time, then a step with no flags at a time past the budget should return `I2C_ERR_TIMEOUT`.
+
+## Testing pure maths: the BMP280 tests
+
+`tests/bmp280_tests.cpp` needs none of the tricks above: no fake registers, no fixture, no playing the hardware. The compensation is a function of numbers, so each test is numbers in, numbers out. That is the payoff of splitting the driver into a bus side and a maths side.
+
+**Where expected values come from.** The hard part of testing maths is not the test, it is knowing the right answer. Three sources, in order of trust:
+1. **Published values**: the datasheet's worked example. Even this needed checking, since the figure says 100653 Pa and the datasheet's own integer code gives 100656.
+2. **An independent calculation**: the floating point formula from appendix 8.1, implemented in the test file. It is a different calculation from the integer code, so agreement means something. `EXPECT_NEAR` with a tolerance, since the two never match exactly.
+3. **Never the code under test.** Running my own function and pasting its output as the expected value only proves the function returns what it returns.
+
+**Choosing inputs that exercise the risky paths.** Ordinary room readings never make an intermediate negative, so they cannot catch unsigned arithmetic. The below-zero test exists for that one bug. Same idea for `UnsignedValuesKeepTheirTopBit` (the two unsigned calibration values with the top bit set) and the zero-divisor test (the one guard in the code).
+
+**Testing a design property.** `PressureDependsOnlyOnItsArguments` computes a second temperature in between and checks the pressure is unchanged. With the datasheet's global `t_fine` it would fail; with `t_fine` passed explicitly it cannot.
+
+### Exercises
+
+1. Why would a test that pastes `bmp280_compensate_P`'s own output as the expected value be worthless?
+2. Which single test fails if `adc_T` is handled as `uint32_t` inside the temperature function, and why only that one?
+3. Why is the pressure tolerance 4 Pa and not 1?
+
+**Answers.** (1) It passes for any implementation, including a wrong one, because the expectation was produced by the code being tested. (2) `BelowZeroAgreesWithFloatingPoint`: only there does `(adc_T >> 3) - (dig_T1 << 1)` go negative, which unsigned arithmetic turns into a huge positive number. (3) The datasheet's own example differs by 2.7 Pa between the integer and floating point versions, and appendix 8.2 only claims about 1 Pa as one standard deviation.
 
 ## Exercises
 

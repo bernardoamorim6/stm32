@@ -1,6 +1,13 @@
 #include "../include/bmp280.h"
 #include <stdint.h>
 
+#define BMP280_ADDR       0x76U
+#define BMP280_REG_ID     0xD0U
+#define BMP280_REG_CALIB  0x88U
+#define BMP280_REG_CTRL   0xF4U
+#define BMP280_REG_DATA   0xF7U
+#define BMP280_CTRL_FORCED_X1  0x25U   /* osrs_t 001, osrs_p 001, mode 01 */
+
 /* Each value is two bytes, low byte first. The cast to int16_t is what makes
    the top bit a sign for the ten signed values. */
 void bmp280_parse_calib(const uint8_t bytes[24], bmp280_calib_t *cal){
@@ -51,4 +58,37 @@ uint32_t bmp280_compensate_P(const bmp280_calib_t *cal, int32_t adc_P, int32_t t
     var2 = (((int32_t)(p>>2)) * ((int32_t)cal->dig_P8))>>13;
     p = (uint32_t)((int32_t)p + ((var1 + var2 + cal->dig_P7) >> 4));
     return p;
+}
+
+i2c_state_t bmp280_read_id(I2C_Regs *i2c, uint8_t *id){
+    i2c_state_t st = i2c_read_reg(i2c, BMP280_ADDR, BMP280_REG_ID, id, sizeof(*id));
+    return st;
+}
+
+/* 0x88..0x9F. The datasheet lists the block up to 0xA1, but 0xA0/0xA1 are reserved. */
+i2c_state_t bmp280_read_calib(I2C_Regs *i2c, bmp280_calib_t *cal){
+    uint8_t bytes[24] = {0};
+    i2c_state_t st = i2c_read_reg(i2c, BMP280_ADDR, BMP280_REG_CALIB, bytes, sizeof(bytes));
+    if (st == I2C_DONE) {
+        bmp280_parse_calib(bytes, cal);
+    }
+    return st;
+}
+
+i2c_state_t bmp280_start_forced(I2C_Regs *i2c){
+    i2c_state_t st = i2c_write_reg(i2c, BMP280_ADDR, BMP280_REG_CTRL, BMP280_CTRL_FORCED_X1);
+    return st;
+}
+
+/* One 6-byte burst: the chip shadows the data registers during a burst, so a
+   measurement finishing mid-read cannot mix bytes from two readings. */
+i2c_state_t bmp280_read_raw(I2C_Regs *i2c, int32_t *adc_T, int32_t *adc_P){
+    uint8_t data[6] = {0};
+    i2c_state_t st = i2c_read_reg(i2c, BMP280_ADDR, BMP280_REG_DATA, data, sizeof(data));
+    if (st == I2C_DONE) {
+        /* msb holds bits 19:12, lsb 11:4, and xlsb keeps 3:0 in its top nibble */
+        *adc_P = (int32_t)(((uint32_t)data[0] << 12) | ((uint32_t)data[1] << 4) | ((uint32_t)data[2] >> 4));
+        *adc_T = (int32_t)(((uint32_t)data[3] << 12) | ((uint32_t)data[4] << 4) | ((uint32_t)data[5] >> 4));
+    }
+    return st;
 }
