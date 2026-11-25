@@ -5,6 +5,7 @@
 #include "../drivers/include/usart.h"
 #include "../drivers/include/bmp280.h"
 #include "../drivers/include/stm32c031_regs.h"
+#include "../drivers/include/ssd1306.h"
 #include <stdint.h>
 
 
@@ -243,6 +244,23 @@ int main(void) {
     print_chip_id("bmp280", 0x76, 0xD0);    /* expect 0x60 for a BME280, 0x58 for a BMP280 */
     print_chip_id("mpu6050", 0x68, 0x75);   /* expect 0x68 */
     print_bmp280_reading();
+
+    i2c_state_t st = ssd1306_startup(I2C1);
+    uart_write_string(USART2, "SSD1306 startup");
+    print_state(st);
+    uart_write_string(USART2, "\r\n");
+
+    static uint8_t screen[SSD1306_BUF_SIZE];
+    ssd1306_clear(screen);
+
+    for (int i = 0; i < SSD1306_BUF_SIZE / 8; i++) {
+        screen[i] = 0xFF;
+    }
+
+    st = ssd1306_send_buffer(I2C1, screen);
+    uart_write_string(USART2, "SSD1306 screen test");
+    print_state(st);
+    uart_write_string(USART2, "\r\n");
 
     uart_write_string(USART2, "echo ready\r\n");
     while (1) {
