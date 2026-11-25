@@ -823,7 +823,7 @@ The datasheet's register descriptions say `press_xlsb` depends on *temperature* 
 
 Raw readings: **adc_T = 519888**, **adc_P = 415148**. The figure's address column puts UT at `0xF7` and UP at `0xFA`, which is backwards against the memory map; the names and values are what count.
 
-Expected: `t_fine = 128422`, temperature **2508** (25.08 °C), pressure **100653.27 Pa** in floating point. The figure also lists an "int32 result" of 100653, but compiling the appendix 8.2 code itself gives **100656**. Footnote (\*\*) warns of exactly this: the integer results deviate slightly from the figure. So the test expects 100656, the value the real code produces, and that value is checked against the floating-point result separately.
+Expected: `t_fine = 128422`, temperature **2508** (25.08 °C), pressure **10065BMP2803.27 Pa** in floating point. The figure also lists an "int32 result" of 100653, but compiling the appendix 8.2 code itself gives **100656**. Footnote (\*\*) warns of exactly this: the integer results deviate slightly from the figure. So the test expects 100656, the value the real code produces, and that value is checked against the floating-point result separately.
 
 ## Compensation design
 
@@ -938,6 +938,140 @@ ctrl_meas: forced mode, 1x oversampling for temprature and pressure.
 Bits: 001 001 01
 Hex: 0x25
 
+# SSD1306
+1. Address: what decides whether it's 0x3C or 0x3D? Look in the I²C interface section for the pin called SA0.
+0 1 1 1 1 0 SA0 R/W#
+SA0 can either be 0 or 1, making the address either 0x3C or 0x3D, respectively. Mine has 0x78 and 0x7A at the back because the manufacturers printed it in the 8-bit form instead of 7 bits, by shifting the entire address left by 1, 0x3C turns to 0x78 and 0x3D turns to 0x7A. So what decides the difference is the SA0 bit.
+My scan produced:
+0x3C
+0x68
+0x76
+So the address is 0x3C.
+
+2. The control byte: in the I²C interface section, the first byte after the address isn't a register number, it's a control byte. What do its Co and D/C# bits mean? Which byte value means "the following bytes are commands" and which means "the following bytes are pixel data"? Then: could your existing i2c_write_reg(addr, reg, value) already send a single command, and why?
+The control byte is sent after the address. It mainly consists of Co and D/C# followed by 6 zeros. 
+Co D/C# 0 0 0 0 0 0
+If Co is 0, one control byte is followed by a stream of bytes of the same kind. If it is 1, every following byte gets its own control byte in front of it. If D/C# is set to 0 it defines the following bytes as commands, if it is 1 it defines them as data to be stored in GDDRAM. So Co = 0 and D/C# = 0 (0x00) means commands follow, and Co = 0 and D/C# = 1 (0x40) means pixel data follows.
+Because 0x00 makes every following byte a command, a two-byte command like 8D 14, or even the whole start-up sequence, can go in one transfer: [0x00, A8, 3F, D3, 00, ...].
+Yes we can write a single command with i2c_write_reg if the command is a single byte. Since the function sends [reg][value], it will just send [control byte][command].
+
+3. The display memory (GDDRAM): how is it organised into pages and columns? Which bit of a data byte is which pixel? How many bytes is a whole screen for your module's size?
+The GDDRAM is organized into 8 pages, page0 to page7. They are used for the monochrome 128x64 dot matrix display.
+Each page is divided into 8 COMs and there are 128 SEGXXX columns.
+For my model size the screen is 128*64 bits, so 1024 bytes.
+So, a bit is the pixel at the crossing of one SEG column and one COM row. When one data byte is written into the GDDRAM, it fills an 8 pixel tall column inside one page, at one segment, with the LSB on top and the MSB on the bottom.
+Assuming the origin on the top left of the page and the y axis pointing down:
+0 <= x < 128; 0 <= y < 64; 
+pixel(x,y):
+page = y / 8;
+bit = y % 8;
+seg = x;
+index = page*128 + x;
+
+This formula describes the RAM. Whether RAM position (0, 0) shows up at the top left of the glass depends on the remap commands; with A1 and C8 it does on these modules.
+
+4. Addressing modes: the datasheet describes three (page, horizontal, vertical). Which one lets you send the entire screen in one continuous stream, and which command selects it?
+Command 20h selects this. Both horizontal and vertical addressing modes send the screen in a continuous stream. I will use horizontal (20h, 00h), since the page-by-page plan in Q6 depends on it. The window can be narrowed by setting the column and page start and end address of the target display location with commands 21h and 22h respectively.
+
+5. Turning it on: from the command table, which commands does a minimal start-up need? Look especially for the charge pump command (0x8D), usually in an appendix or application note. Why do these modules need it, and what happens if you forget it?
+The modules need the charge pump command to generate a 7.5V supply from a low voltage supply input. This voltage is VCC, the high voltage that drives the OLED pixels themselves; the logic runs on VDD, the 3.3V I supply.
+On startup we need to run command 8D 14 to turn the charge pump on. No external capacitors are needed: the app note describes the circuit around the bare chip, and the module already has the charge pump capacitors on its board.
+The sequence is:
+AE (Display off) -> A8 3F (Set MUX Ratio) -> D3 00 (Set display offset) -> 40 (Set display start line) -> A1 (Set segment re-map) -> C8 (Set COM ouput scan direction) -> DA 12 (Set COM Pins hardware configuration) -> 81 7F (Set Contrast Control) -> A4 (Disable entire display On) -> A6 (Set normal display) -> D5 80 (Set Osc Frequency) -> 8D 14 (Enable charge pump regulator) -> 20 00 (set mode to horizontal addressing) -> clear the screen (1024 zero bytes) -> AF (Display On)
+
+AE comes first because the Nucleo's reset button resets the STM32 but not the display: it stays powered and on, so the start-up has to be safe to run on a display that is already running.
+DA 12, not the flowchart's DA 02: 02 is for 128x32 panels and would draw every other line on a 128x64 one. 12 is also the reset value of this command.
+The screen is cleared before AF because the display memory is not cleared at power-up; without it the first thing on the screen is random pixels.
+
+Without 8D 14, every I2C transfer ACKs and reports DONE but the screen stays black, so the driver has no way to notice.
+
+6. Transfer size: your I²C driver sets NBYTES, which is 8 bits, without RELOAD, so one transfer carries at most 255 bytes. How would you send a whole screen anyway? Hint: think in pages.
+The entire screen is 1024 bytes so it would take at least 5 transfers of up to 255 bytes to send the entire screen. Instead, we can send a page at a time. Each page is 128 bytes, so we can't send 2 pages because that would take 256 bytes. Along with the control byte, this means each transfer would be 129 bytes, which still fits with a lot of headroom. So I will use horizontal addressing and send one page at a time.
+Since we are using horizontal addressing mode, after each page is filled (the column pointer reaches the last column) the column pointer is reset and the page address pointer is automatically incremented by 1, continuing to the next page.
+If one page transfer fails halfway, the pointer is left in the wrong place for everything after it. So every full-screen update starts with 21 00 7F and 22 00 07, which resets the window, and a failed frame cannot misalign the next one.
+
+7. Text: the SSD1306 has no built-in font, only pixels. How will you draw 21.43 C? Which characters do you actually need, and how many bytes would a small font for just those take in flash?
+We would need digits 0-9, the minus sign, the dot, the letters " " (space), "C", "h", "P" and "a".  
+We can just store each in a 5x8 grid, which matches the page height. This makes each letter and number 5 column bytes, which gives us 6 bytes per character when we account for the space between characters, which comes out to 102 bytes total. The space character is just six zero bytes; I could skip storing it and only advance the cursor, but storing it keeps the drawing code simpler.
+
+8. Speed: at your measured 103.5 kHz, roughly how long does sending one full screen take, at 9 clocks per byte? Is that a problem for updating a temperature once a second?
+Since a full screen is 1024 bytes, at 103.5kHz and 9 clocks per byte, we would have 1024*9/103.5k which comes out to about 89ms, with the control and address bytes it's about 90ms. That is about 9% of a second, so it shouldn't be too bad for updating the temperature once a second.
+This time is ok visually, but since I2C is blocking on the processor, we need to find a different way to approach this so the processor isn't frozen for 90ms. To fix this we can either only send the pages that changed, or run the bus at 400 kHz Fast-mode, which all three devices on the bus support; that needs a different TIMINGR value from the same RM0490 table.
+
+## Driver design
+1. Compare it with what you have. Your write sends [reg][value]. The display needs [control byte][n bytes]. Is your current write just a block write with n = 1? So should you generalise i2c_step_write to take a buffer and a length, with i2c_write_reg becoming a one-byte call of it, or add a separate block write next to it? Pick one and give a reason. Think about your 11 existing write tests: in which option do they keep passing unchanged?
+The tests only keep passing unchanged if I write a new function, so that is what I am going to do although I think if I changed the function I would just need to add a parameter and add that parameter to the tests, something like "bytes", and the function would check its length and continue as normal if it was 1. But in this case I think another function is justifiable in order to not disturb the tests and so we leave proof of work with the original function.
+
+2. States. Which states does a block write go through? How does the machine know when the last byte has gone out? Your read already has the same "keep going until count == len" pattern in one of its states, so name which one.
+```mermaid
+stateDiagram-v2
+    [*] --> START_WRITE
+    START_WRITE --> WAIT_TXIS_CTRL : write CR2 (addr << 1, write, NBYTES=len+1, AUTOEND=1, START)
+
+    WAIT_TXIS_CTRL --> WAIT_TXIS_DATA : TXIS / write control byte to TXDR
+    WAIT_TXIS_CTRL --> WAIT_STOPF : NACKF / error = NACK_ADDR
+
+    WAIT_TXIS_DATA --> WAIT_TXIS_DATA : TXIS, more to send / send tx[count]
+    WAIT_TXIS_DATA --> WAIT_STOPF : TXIS, last byte / send tx[count]
+    WAIT_TXIS_DATA --> WAIT_STOPF : NACKF / error = NACK_DATA
+
+    WAIT_STOPF --> DONE : STOPF, no error / clear STOPF and NACKF
+    WAIT_STOPF --> ERR_NACK_ADDR : STOPF, error NACK_ADDR / clear STOPF and NACKF
+    WAIT_STOPF --> ERR_NACK_DATA : STOPF, error NACK_DATA, or NACKF with no error (last byte refused) / clear STOPF and NACKF
+
+    DONE --> [*]
+    ERR_NACK_ADDR --> [*]
+    ERR_NACK_DATA --> [*]
+```
+
+The read state that has the same pattern is WAIT_RXNE.
+
+3. CR2. What is NBYTES for a block of len data bytes, given the control byte also counts? What's the largest len you can send without RELOAD?
+Since the control byte also counts, NBYTES = len + 1. The largest amount we can send is 255 bytes at once. Assuming Co in the first control byte is 0 and the remaining bytes are all data bytes, the maximum len we can send is 255 - 1 = 254.
+
+4. NACKs. For each point, which state is the machine in, and which error results: the address, the control byte, a data byte in the middle, and the last data byte. Remember your value-byte rule from the single write.
+
+| NACK on | State when it arrives | Result |
+|---|---|---|
+| address | WAIT_TXIS_CTRL (the TXIS for the control byte never comes) | ERR_NACK_ADDR |
+| control byte | WAIT_TXIS_DATA, count 0 | ERR_NACK_DATA |
+| a middle data byte | WAIT_TXIS_DATA | ERR_NACK_DATA |
+| the last data byte | WAIT_STOPF, end_state still DONE, NACKF arrives together with STOPF | ERR_NACK_DATA, from the value-byte rule |
+
+AUTOEND sends the STOP after any NACK, which is why every case goes through WAIT_STOPF.
+
+5. const. A write only reads the caller's buffer, so it should take a const uint8_t *. But i2c_xfer_t.buf is a plain uint8_t *, because the read writes into it. How do you store a read-only buffer in the struct without casting the const away? Name at least one option.
+We can add a new field declared as const uint8_t *tx, so the read keeps using buf and writes use tx.
+
+6. Functions: List them in a table like your BMP280 one: start-up, clear, send the buffer to the display, draw a character, draw a string. For each, say whether it talks over I²C or only changes the buffer in RAM, and which ones can be host-tested.
+| Function | I²C or RAM | Host test |
+|---|---|---|
+| `ssd1306_startup(i2c)` | I²C only | board only |
+| `ssd1306_clear(buf)` | RAM only | yes: all 1024 bytes are 0 |
+| `ssd1306_send_buffer(i2c, buf)` | I²C only | board only |
+| `ssd1306_draw_char(buf, c, col, page)` | RAM only | yes: the font bytes land at the expected index |
+| `ssd1306_draw_string(buf, s, col, page)` | RAM only | yes: same, one character after another |
+
+The I²C functions return the `i2c_state_t` of their transfer so the caller can see a failure; the RAM functions return void.
+
+7. The screen buffer. Where does the 1024-byte buffer live: a static array inside ssd1306.c, or an array the caller owns and passes in? Give one argument for each, and pick one. Your chip has 12 KB of SRAM and uses 148 bytes today, so is 1024 bytes a problem?
+The buffer must survive between updates, so it can't be a local in a drawing function.
+- Static inside ssd1306.c: shorter calls and no caller can pass the wrong array, but it is hidden state, tests can't see it without a getter, and every test shares it (the same leak as `Fake::mem`).
+- Owned by the caller: each test passes its own fresh array, like the GPIO tests pass `&p`, and there is no hidden state, the same reason `t_fine` is passed in explicitly. The cost is one more parameter on every call.
+
+I pick the caller-owned buffer, declared as a static array of 1024 bytes in main.c, so it sits in `.bss` rather than on the stack and shows up in the size output. 148 + 1024 bytes is about 10% of the 12 KB of SRAM, so it's not a problem.
+
+8. Drawing a character. Using your Q3 formula, at which buffer index does column c of a character start when drawn at text position (col, page)? What should happen if a string runs off the right edge at x = 128?
+Column c of a character drawn at text position (col, page) starts at col + c (col is a pixel column). So it starts at buffer index = pagex128 + col + c. Character n of a string starts at col + nx6. Past 127 we stop drawing (clip): without the rule, x = 128 gives page*128 + 128, column 0 of the next page, and on page 7 it writes past the end of the buffer.
+
+9. Once a second, without freezing. Right now main reads the BMP280 once at boot. To update every second, a delay_ms(1000) in the loop would freeze the echo and the button for a whole second. How can the loop check whether a second has passed without waiting? Hint: you already did exactly this in i2c_step with now_ms and start_ms.
+Every pass of the loop reads now = systick_now(). If now - last >= 1000, then last = now and we take the reading. The unsigned subtraction survives the counter wrapping, like in i2c_step.
+Since the measurement has a delay_ms(10) and sending two pages takes about 23 ms, the loop pauses for about 35 ms per second, which is acceptable. UART is interrupt driven, so any typed characters wait in the 64-byte ring buffer. A long paste could overflow it, but in our use case this shouldn't be a problem.
+
+10. How much to send. The two readings fit on two text lines. Which pages do they occupy, and how long does sending just those pages take at 103.5 kHz, compared with the 90 ms for the whole screen?
+I would say they can sit in the top left, at pages 1 and 3, so there is a gap between them and the numbers don't merge and become unreadable.
+Each page is one transfer: address, control byte and the 128 data bytes, which makes 130 bytes on the wire per page. This gives us 130 x 2 = 260 bytes x 9 clocks = 2340 clocks / 103.5 kHz = 22.6 ms, against 8 x 130 = 1040 bytes = 90.4 ms for the whole screen, about 4 times faster.
+Since pages 1 and 3 aren't next to each other and we are using horizontal addressing, which goes from page 1 to 2, we need to set the page range before each page is sent: 22 01 01 and then 22 03 03. Each is a 5-byte transfer which only takes about 0.4 ms (5 bytes x 9 clocks / 103.5 kHz). Sending pages 1 to 3 in one transfer isn't an option anyway: 384 data bytes is over the 254 limit from Q3.
 
 # How the tests work, for studying
 

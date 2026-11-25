@@ -116,6 +116,12 @@ static void print_state(i2c_state_t st) {
         case I2C_WAIT_TXIS_VALUE:
             uart_write_string(USART2, "WAIT_TXIS_VALUE");
             break;
+        case I2C_WAIT_TXIS_CTRL:
+            uart_write_string(USART2, "WAIT_TXIS_CTRL");
+            break;
+        case I2C_WAIT_TXIS_DATA:
+            uart_write_string(USART2, "WAIT_TXIS_DATA");
+            break;
         case I2C_DONE:
             uart_write_string(USART2, "DONE");
             break;
@@ -130,6 +136,9 @@ static void print_state(i2c_state_t st) {
             break;
         case I2C_ERR_TIMEOUT:
             uart_write_string(USART2, "ERR_TIMEOUT");
+            break;
+        case I2C_ERR_LEN:
+            uart_write_string(USART2, "ERR_LEN");
             break;
         default:
             break;

@@ -41,39 +41,51 @@ typedef enum {
     I2C_WAIT_STOPF,
     I2C_WAIT_TXIS_REG,
     I2C_WAIT_TXIS_VALUE,
+    I2C_WAIT_TXIS_CTRL,
+    I2C_WAIT_TXIS_DATA,
     I2C_DONE,
     I2C_ERR_NACK_ADDR,
     I2C_ERR_NACK_DATA,
     I2C_ERR_BUS,
     I2C_ERR_TIMEOUT,
+    I2C_ERR_LEN,
 } i2c_state_t;
 
-/* Everything one register read needs between calls to i2c_step_read or i2c_step_write. */
+/* Everything needed between calls to i2c_step_read or i2c_step_write. */
 typedef struct {
-    i2c_state_t state;
-    i2c_state_t end_state;   /* where WAIT_STOPF finishes: I2C_DONE, or the NACK that sent us there */
-    uint8_t  addr;           /* 7-bit, unshifted */
-    uint8_t  reg;
-    uint8_t  value;
-    uint8_t *buf;
-    uint8_t  len;            /* 1 to 255: NBYTES is 8 bits and RELOAD is not used */
-    uint8_t  count;
-    uint32_t start_ms;
-    uint32_t timeout_ms;
+   i2c_state_t state;
+   i2c_state_t end_state;     /* where WAIT_STOPF finishes: I2C_DONE, or the NACK that sent us there */
+   uint8_t addr;              /* 7-bit, unshifted */
+   uint8_t reg;
+   uint8_t value;
+   uint8_t *buf;
+   uint8_t len;               /* 1 to 255: NBYTES is 8 bits and RELOAD is not used */
+   uint8_t count;
+   uint32_t start_ms;
+   uint32_t timeout_ms;
+   const uint8_t *tx;         /* data for a block write, read-only */
 } i2c_xfer_t;
 
 void i2c_init(I2C_Regs *i2c);
+
 i2c_state_t i2c_read_reg(I2C_Regs *i2c, uint8_t addr, uint8_t reg, uint8_t *buf, uint8_t len);
 
 i2c_state_t i2c_write_reg(I2C_Regs *i2c, uint8_t addr, uint8_t reg, uint8_t value);
+
+i2c_state_t i2c_write_block(I2C_Regs *i2c, uint8_t addr, uint8_t reg, const uint8_t *tx, uint8_t len);
 
 /* Prepares a read of len bytes starting at register reg. Touches no hardware. */
 void i2c_xfer_begin_read(i2c_xfer_t *xfer, uint8_t addr, uint8_t reg, uint8_t *buf,
                     uint8_t len, uint32_t now_ms, uint32_t timeout_ms);
 
 /* Prepares a single register write: reg, then value, then STOP. Touches no hardware. */
-void i2c_xfer_begin_write(i2c_xfer_t *xfer, uint8_t addr, uint8_t reg, uint8_t value, 
+void i2c_xfer_begin_write(i2c_xfer_t *xfer, uint8_t addr, uint8_t reg, uint8_t value,
                     uint32_t now_ms, uint32_t timeout_ms);
+
+/* Prepares a block write: reg, then tx, then STOP. Touches no hardware.
+   len 1 to 254, anything else ends in I2C_ERR_LEN. */
+void i2c_xfer_begin_write_block(i2c_xfer_t *xfer, uint8_t addr, uint8_t reg, const uint8_t *tx,
+                     uint8_t len, uint32_t now_ms, uint32_t timeout_ms);
 
 /* Advances the transfer by at most one action and returns the new state.
    Never waits: time comes in as now_ms, so the timeout is testable on a host.
@@ -84,6 +96,10 @@ i2c_state_t i2c_step_read(I2C_Regs *i2c, i2c_xfer_t *xfer, uint32_t now_ms);
 /* Same contract and check order as i2c_step_read, for a single register write.
    A NACK on the value byte arrives after the last TXIS, so it is reported at STOPF. */
 i2c_state_t i2c_step_write(I2C_Regs *i2c, i2c_xfer_t *xfer, uint32_t now_ms);
+
+/* Same contract and check order as i2c_step_read, for a block write. A NACK on
+   the last byte arrives after the last TXIS, so it is reported at STOPF. */
+i2c_state_t i2c_step_write_block(I2C_Regs *i2c, i2c_xfer_t *xfer, uint32_t now_ms);
 
 #ifdef __cplusplus
 }

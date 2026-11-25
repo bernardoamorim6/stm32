@@ -1,3 +1,4 @@
+#include <cstdint>
 #include <cstring>
 #include <gtest/gtest.h>
 #include "../drivers/include/i2c.h"
@@ -5,27 +6,28 @@
 /* Bit values written out from RM0490 rather than taken from i2c.h, so a wrong
    #define in the driver cannot be hidden by the same wrong value here. */
 namespace {
-constexpr uint32_t TXIS  = 1U << 1;
-constexpr uint32_t RXNE  = 1U << 2;
-constexpr uint32_t NACKF = 1U << 4;
-constexpr uint32_t STOPF = 1U << 5;
-constexpr uint32_t TC    = 1U << 6;
-constexpr uint32_t BERR  = 1U << 8;
-constexpr uint32_t ARLO  = 1U << 9;
+    constexpr uint32_t TXIS  = 1U << 1;
+    constexpr uint32_t RXNE  = 1U << 2;
+    constexpr uint32_t NACKF = 1U << 4;
+    constexpr uint32_t STOPF = 1U << 5;
+    constexpr uint32_t TC    = 1U << 6;
+    constexpr uint32_t BERR  = 1U << 8;
+    constexpr uint32_t ARLO  = 1U << 9;
 
-constexpr uint32_t NACKCF = 1U << 4;
-constexpr uint32_t STOPCF = 1U << 5;
-constexpr uint32_t BERRCF = 1U << 8;
-constexpr uint32_t ARLOCF = 1U << 9;
+    constexpr uint32_t NACKCF = 1U << 4;
+    constexpr uint32_t STOPCF = 1U << 5;
+    constexpr uint32_t BERRCF = 1U << 8;
+    constexpr uint32_t ARLOCF = 1U << 9;
 
-/* Address 0x76, worked out by hand:
-   write phase: SADD 0x76 << 1 = 0xEC, NBYTES 1 << 16, START 1 << 13           */
-constexpr uint32_t CR2_WRITE_REG = 0x000120ECU;
-/* read phase: the above plus RD_WRN 1 << 10 and AUTOEND 1 << 25, NBYTES = n   */
-constexpr uint32_t CR2_READ_1    = 0x020124ECU;
-constexpr uint32_t CR2_READ_3    = 0x020324ECU;
+    /* Address 0x76, worked out by hand:
+    write phase: SADD 0x76 << 1 = 0xEC, NBYTES 1 << 16, START 1 << 13           */
+    constexpr uint32_t CR2_WRITE_REG = 0x000120ECU;
+    /* read phase: the above plus RD_WRN 1 << 10 and AUTOEND 1 << 25, NBYTES = n   */
+    constexpr uint32_t CR2_READ_1    = 0x020124ECU;
+    constexpr uint32_t CR2_READ_3    = 0x020324ECU;
 
-constexpr uint32_t CR2_WRITE_2 = 0x020220ECU;
+    constexpr uint32_t CR2_WRITE_2 = 0x020220ECU;
+    constexpr uint32_t CR2_WRITE_3 = 0x02042078U;
 }  // namespace
 
 /* The fake has no side effects: writing TXDR does not clear TXIS, writing ICR
@@ -381,5 +383,162 @@ TEST_F(I2cWrite, BusErrorEndsTheTransfer) {
 
 TEST_F(I2cWrite, TimesOutOnceTheBudgetIsExceeded) {
     to_wait_txis_reg();
+    EXPECT_EQ(step(0, 11), I2C_ERR_TIMEOUT);
+}
+
+
+class I2cWriteBlock : public ::testing::Test {
+protected:
+    I2C_Regs fake{};
+    i2c_xfer_t x{};
+    uint8_t fake_tx[3] = {0x32U, 0x12U, 0x88U};
+
+    void SetUp() override {
+        std::memset(&fake, 0, sizeof(fake));
+    }
+
+    void begin(uint32_t now = 0, uint32_t timeout = 10) {
+        i2c_xfer_begin_write_block(&x, 0x3CU, 0x40, fake_tx, 3, now, timeout);
+    }
+
+    /* Also checks the returned state was stored: callers loop on x.state, so a
+       state that is only returned never ends the loop. */
+    i2c_state_t step(uint32_t isr, uint32_t now = 0) {
+        fake.ISR = isr;
+        const i2c_state_t s = i2c_step_write_block(&fake, &x, now);
+        EXPECT_EQ(s, x.state) << "returned a state without storing it";
+        return s;
+    }
+
+    // Drive a fresh write to a given wait state, playing the hardware
+    void to_wait_txis_ctrl()  { begin(); step(0); }
+    void to_wait_txis_data()    { to_wait_txis_ctrl(); step(TXIS); }
+    void to_wait_stopf() { to_wait_txis_data(); step(TXIS); step(TXIS); step(TXIS); }
+};
+
+TEST_F(I2cWriteBlock, BeginTouchesNoHardware) {
+    begin();
+    EXPECT_EQ(x.state, I2C_START_WRITE);
+    EXPECT_EQ(x.count, 0);
+    EXPECT_EQ(fake.CR2, 0U);
+    EXPECT_EQ(x.len, 3);
+    EXPECT_EQ(x.tx[0], 0x32U);
+    EXPECT_EQ(x.tx[1], 0x12U);
+    EXPECT_EQ(x.tx[2], 0x88U);
+}
+
+/* --- the happy path, one arrow at a time ----------------------------------- */
+
+TEST_F(I2cWriteBlock, StartSends4BytesWithAutoendAndStart) {
+    begin();
+    EXPECT_EQ(step(0), I2C_WAIT_TXIS_CTRL);
+    EXPECT_EQ(fake.CR2, CR2_WRITE_3);
+}
+
+TEST_F(I2cWriteBlock, FirstTxisSendsTheCtrlByte) {
+    to_wait_txis_ctrl();
+    EXPECT_EQ(step(TXIS), I2C_WAIT_TXIS_DATA);
+    EXPECT_EQ(fake.TXDR, 0x40U);
+}
+
+TEST_F(I2cWriteBlock, LaterTxisSendsTheData) {
+    to_wait_txis_data();
+    EXPECT_EQ(step(TXIS), I2C_WAIT_TXIS_DATA);
+    EXPECT_EQ(fake.TXDR, 0x32U);
+
+    EXPECT_EQ(step(TXIS), I2C_WAIT_TXIS_DATA);
+    EXPECT_EQ(fake.TXDR, 0x12U);
+
+    EXPECT_EQ(step(TXIS), I2C_WAIT_STOPF);
+    EXPECT_EQ(fake.TXDR, 0x88U);
+}
+
+TEST_F(I2cWriteBlock, NoTxisDoesntWrite) {
+    to_wait_txis_data();
+    EXPECT_EQ(step(0), I2C_WAIT_TXIS_DATA);
+    EXPECT_EQ(fake.TXDR, 0x40U);
+}
+
+TEST_F(I2cWriteBlock, StopfFinishes) {
+    to_wait_stopf();
+    EXPECT_EQ(step(STOPF), I2C_DONE);
+    EXPECT_NE(fake.ICR & STOPCF, 0U);
+}
+
+TEST_F(I2cWriteBlock, SingleByteGoesStraightToStopf) {
+    i2c_xfer_begin_write_block(&x, 0x3CU, 0x40, fake_tx, 1, 0, 10);
+    step(0);
+    step(TXIS);
+    EXPECT_EQ(step(TXIS), I2C_WAIT_STOPF);
+    EXPECT_EQ(fake.TXDR, 0x32U);
+}
+
+/* --- lengths NBYTES cannot hold -------------------------------------------- */
+
+TEST_F(I2cWriteBlock, ZeroLengthIsRefused) {
+    i2c_xfer_begin_write_block(&x, 0x3CU, 0x40, fake_tx, 0, 0, 10);
+    EXPECT_EQ(x.state, I2C_ERR_LEN);
+    EXPECT_EQ(step(TXIS), I2C_ERR_LEN);
+    EXPECT_EQ(fake.CR2, 0U);
+    EXPECT_EQ(fake.TXDR, 0U);
+}
+
+/* len + 1 = 256 would spill out of NBYTES into RELOAD */
+TEST_F(I2cWriteBlock, LengthOver254IsRefused) {
+    i2c_xfer_begin_write_block(&x, 0x3CU, 0x40, fake_tx, 255, 0, 10);
+    EXPECT_EQ(x.state, I2C_ERR_LEN);
+    EXPECT_EQ(step(TXIS), I2C_ERR_LEN);
+    EXPECT_EQ(fake.CR2, 0U);
+    EXPECT_EQ(fake.TXDR, 0U);
+}
+
+/* --- NACKs: wait for the automatic STOP, then report which one ------------- */
+
+TEST_F(I2cWriteBlock, NackOnAddressEndsAsAddressError) {
+    to_wait_txis_ctrl();
+    EXPECT_EQ(step(NACKF), I2C_WAIT_STOPF);
+    EXPECT_EQ(fake.ICR, 0U) << "nothing should be cleared before the STOP completes";
+    EXPECT_EQ(step(NACKF | STOPF), I2C_ERR_NACK_ADDR);
+    EXPECT_NE(fake.ICR & NACKCF, 0U);
+    EXPECT_NE(fake.ICR & STOPCF, 0U);
+}
+
+TEST_F(I2cWriteBlock, NackOnControlByteEndsAsDataError) {
+    to_wait_txis_data();
+    EXPECT_EQ(step(NACKF), I2C_WAIT_STOPF);
+    EXPECT_EQ(step(NACKF | STOPF), I2C_ERR_NACK_DATA);
+    EXPECT_NE(fake.ICR & NACKCF, 0U);
+    EXPECT_NE(fake.ICR & STOPCF, 0U);
+}
+
+TEST_F(I2cWriteBlock, NackOnLastDataByteEndsAsDataError) {
+    to_wait_stopf();
+    EXPECT_EQ(step(NACKF), I2C_WAIT_STOPF);
+    EXPECT_EQ(step(NACKF | STOPF), I2C_ERR_NACK_DATA);
+    EXPECT_NE(fake.ICR & NACKCF, 0U);
+    EXPECT_NE(fake.ICR & STOPCF, 0U);
+}
+
+TEST_F(I2cWriteBlock, NackOnMiddleDataByteEndsAsDataError) {
+    to_wait_txis_data();
+    EXPECT_EQ(step(TXIS), I2C_WAIT_TXIS_DATA);
+    EXPECT_EQ(step(NACKF), I2C_WAIT_STOPF);
+    EXPECT_EQ(step(NACKF | STOPF), I2C_ERR_NACK_DATA);
+    EXPECT_NE(fake.ICR & NACKCF, 0U);
+    EXPECT_NE(fake.ICR & STOPCF, 0U);
+}
+
+/* --- bus errors ------------------------------------------------------------ */
+
+TEST_F(I2cWriteBlock, BusErrorEndsTheTransfer) {
+    to_wait_txis_ctrl();
+    EXPECT_EQ(step(BERR), I2C_ERR_BUS);
+    EXPECT_NE(fake.ICR & BERRCF, 0U);
+}
+
+/* --- timeouts: begin at t = 0 with a 10 ms budget -------------------------- */
+
+TEST_F(I2cWriteBlock, TimesOutOnceTheBudgetIsExceeded) {
+    to_wait_txis_data();
     EXPECT_EQ(step(0, 11), I2C_ERR_TIMEOUT);
 }
