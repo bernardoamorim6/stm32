@@ -161,16 +161,17 @@ static void button_drives_led(void) {
     gpio_write(GPIOA, 5, gpio_read(GPIOC, 13) == 0);
 }
 
-/* Screen goes blank if a reading fails */
-static void update_readings(uint8_t *screen, const bmp280_calib_t *cal, i2c_state_t st){
+/* Screen goes blank if a reading fails: an old value left up would look current.
+   The blank frame is still sent, so the panel never shows stale or random pixels. */
+static void update_readings(uint8_t *screen, const bmp280_calib_t *cal, i2c_state_t cal_state){
     ssd1306_clear(screen);
-    if (st == I2C_DONE){
+    if (cal_state == I2C_DONE){
         uint32_t pascal = 0;
         int32_t temp = 0;
-        st = bmp280_measurement(I2C1, cal, &temp, &pascal);
-        if(st != I2C_DONE){
+        i2c_state_t meas_state = bmp280_measurement(I2C1, cal, &temp, &pascal);
+        if (meas_state != I2C_DONE) {
             uart_write_string(USART2, "Error taking measurements ");
-            print_state(st);
+            print_state(meas_state);
             uart_write_string(USART2, "\r\n");
         } else {
             uint8_t t_len;
@@ -194,12 +195,12 @@ static void update_readings(uint8_t *screen, const bmp280_calib_t *cal, i2c_stat
             ssd1306_draw_string(screen, pascal_string, 0, 1);
             ssd1306_draw_string(screen, " hPa", (p_len * 6), 1);
         }
-        st = ssd1306_send_buffer(I2C1, screen);
-        if (st != I2C_DONE) {
-            uart_write_string(USART2, "Error sending buffer to screen ");
-            print_state(st);
-            uart_write_string(USART2, "\r\n");
-        }
+    }
+    i2c_state_t send_state = ssd1306_send_buffer(I2C1, screen);
+    if (send_state != I2C_DONE) {
+        uart_write_string(USART2, "Error sending buffer to screen ");
+        print_state(send_state);
+        uart_write_string(USART2, "\r\n");
     }
 }
 
@@ -217,9 +218,9 @@ int main(void) {
     i2c_bus_scan();
     print_chip_id("bmp280", 0x76, 0xD0);    /* expect 0x60 for a BME280, 0x58 for a BMP280 */
     print_chip_id("mpu6050", 0x68, 0x75);   /* expect 0x68 */
-    i2c_state_t st = ssd1306_startup(I2C1);
+    i2c_state_t oled_state = ssd1306_startup(I2C1);
     uart_write_string(USART2, "SSD1306 startup");
-    print_state(st);
+    print_state(oled_state);
     uart_write_string(USART2, "\r\n");
     /* static puts the 1 KB in .bss, not on the stack, and it outlives every frame */
     static uint8_t screen[SSD1306_BUF_SIZE];
@@ -228,7 +229,7 @@ int main(void) {
        is reported and the screen stays blank, but the board keeps running. */
     bmp280_calib_t cal = {0};
     i2c_state_t cal_state = bmp280_read_calib(I2C1, &cal);
-    if (st != I2C_DONE) {
+    if (cal_state != I2C_DONE) {
         uart_write_string(USART2, "Error taking calibration values ");
         print_state(cal_state);
         uart_write_string(USART2, "\r\n");
