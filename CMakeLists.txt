@@ -27,8 +27,8 @@ endif()
 if(CMAKE_CROSSCOMPILING)
   # ARM build: executable target
   add_executable(
-    firmware 
-    app/main.c 
+    firmware
+    app/main.c
     drivers/src/startup.c
     drivers/src/systick.c
     drivers/src/gpio.c
@@ -165,7 +165,17 @@ else()
     GTest::gtest_main
   )
 
-  foreach(t bitops_tests gpio_tests ringbuffer_tests reg_tests i2c_tests bmp280_tests ssd1306_tests)
+  add_executable(
+    formatter_tests
+    tests/formatter_tests.cpp
+    drivers/src/formatter.c
+  )
+  target_link_libraries(
+    formatter_tests
+    GTest::gtest_main
+  )
+
+  foreach(t bitops_tests gpio_tests ringbuffer_tests reg_tests i2c_tests bmp280_tests ssd1306_tests formatter_tests)
     target_compile_options(${t} PRIVATE ${PROJECT_WARNINGS})
   endforeach()
 
@@ -177,6 +187,7 @@ else()
   gtest_discover_tests(i2c_tests)
   gtest_discover_tests(bmp280_tests)
   gtest_discover_tests(ssd1306_tests)
+  gtest_discover_tests(formatter_tests)
 
   # A test that passes only if the source FAILS to compile, and with the
   # expected static_assert message, so a typo cannot make it pass by accident.
