@@ -6,7 +6,7 @@
 #include "../drivers/include/bmp280.h"
 #include "../drivers/include/stm32c031_regs.h"
 #include "../drivers/include/ssd1306.h"
-#include <stdint.h>
+#include "../drivers/include/formatter.h"
 
 
 static void clock_init(void){
@@ -63,33 +63,6 @@ static void print_hex(uint8_t value) {
     uart_write_byte(USART2, 'x');
     uart_write_byte(USART2, high_nibble);
     uart_write_byte(USART2, low_nibble);
-}
-
-/* A value in hundredths as a decimal, so 2143 prints as 21.43. Digits come out
-   lowest first, so they are collected and sent in reverse. */
-static void print_hundredths(int32_t value){
-    char digits[10];
-    if (value < 0) {
-        uart_write_byte(USART2, '-');
-    }
-    uint32_t n = (value < 0) ? (0U - (uint32_t)value) : (uint32_t)value;
-    uint32_t whole = n / 100;
-    uint32_t frac = n % 100;
-
-    int i = 0;
-    do {
-        digits[i] = (char)('0' + (whole % 10));
-        whole /= 10;
-        i++;
-    } while (whole > 0);
-
-    while (i > 0) {
-        i--;
-        uart_write_byte(USART2, digits[i]);
-    }
-    uart_write_byte(USART2, '.');
-    uart_write_byte(USART2, (char)('0' + (frac / 10)));
-    uart_write_byte(USART2, (char)('0' + (frac % 10)));
 }
 
 /* The i2c_state_t, prints a string with the state name */
@@ -176,47 +149,6 @@ static void print_chip_id(const char *name, uint8_t addr, uint8_t reg) {
     uart_write_string(USART2, "\r\n");
 }
 
-/* One forced measurement. Any bus step that does not end in DONE is reported
-   by name, and nothing is printed from data that was never written. */
-static void print_bmp280_reading(void) {
-    bmp280_calib_t cal = {0};
-    int32_t adc_T = 0;
-    int32_t adc_P = 0;
-    int32_t t_fine = 0;
-
-    i2c_state_t st = bmp280_read_calib(I2C1, &cal);
-    if (st != I2C_DONE) {
-        uart_write_string(USART2, "bmp280 calibration failed");
-        print_state(st);
-        uart_write_string(USART2, "\r\n");
-        return;
-    }
-    st = bmp280_start_forced(I2C1);
-    if (st != I2C_DONE) {
-        uart_write_string(USART2, "bmp280 start failed");
-        print_state(st);
-        uart_write_string(USART2, "\r\n");
-        return;
-    }
-    delay_ms(10);   /* x1 oversampling takes 6.4 ms at most (datasheet Table 13) */
-    st = bmp280_read_raw(I2C1, &adc_T, &adc_P);
-    if (st != I2C_DONE) {
-        uart_write_string(USART2, "bmp280 read failed");
-        print_state(st);
-        uart_write_string(USART2, "\r\n");
-        return;
-    }
-
-    const int32_t celsius_x100 = bmp280_compensate_T(&cal, adc_T, &t_fine);
-    const uint32_t pascal = bmp280_compensate_P(&cal, adc_P, t_fine);
-    uart_write_string(USART2, "Temperature ");
-    print_hundredths(celsius_x100);
-    uart_write_string(USART2, " C\r\n");
-    uart_write_string(USART2, "Pressure ");
-    print_hundredths((int32_t)pascal);   /* Pa are hundredths of a hPa */
-    uart_write_string(USART2, " hPa\r\n");
-}
-
 /* Neither call blocks on the wire, so the button stays responsive. */
 static void echo_one_byte(void) {
     uint8_t byte;
@@ -243,19 +175,53 @@ int main(void) {
     i2c_bus_scan();
     print_chip_id("bmp280", 0x76, 0xD0);    /* expect 0x60 for a BME280, 0x58 for a BMP280 */
     print_chip_id("mpu6050", 0x68, 0x75);   /* expect 0x68 */
-    print_bmp280_reading();
-
     i2c_state_t st = ssd1306_startup(I2C1);
     uart_write_string(USART2, "SSD1306 startup");
     print_state(st);
     uart_write_string(USART2, "\r\n");
-
     /* static puts the 1 KB in .bss, not on the stack, and it outlives every frame */
     static uint8_t screen[SSD1306_BUF_SIZE];
     ssd1306_clear(screen);
 
-    ssd1306_draw_string(screen, "1021.37 hPa", 0, 1);
-    ssd1306_draw_string(screen, "----------------------", 0, 3);
+    /* Calibration once at boot. Without it any reading is nonsense, so a failure
+       is reported and the screen stays blank, but the board keeps running. */
+    bmp280_calib_t cal = {0};
+    st = bmp280_read_calib(I2C1, &cal);
+    if (st != I2C_DONE) {
+        uart_write_string(USART2, "Error taking calibration values ");
+        print_state(st);
+        uart_write_string(USART2, "\r\n");
+    } else {
+        uint32_t pascal = 0;
+        int32_t temp = 0;
+        st = bmp280_measurement(I2C1, &cal, &temp, &pascal);
+        if(st != I2C_DONE){
+            uart_write_string(USART2, "Error taking measurements ");
+            print_state(st);
+            uart_write_string(USART2, "\r\n");
+        } else {
+            uint8_t t_len;
+            uint8_t p_len;
+            char temp_string[FORMATTED_MEASUREMENT_SIZE] = {};
+            t_len = measurement_formatter(temp, temp_string);
+            char pascal_string[FORMATTED_MEASUREMENT_SIZE] = {};
+            p_len = measurement_formatter((int32_t)pascal, pascal_string);
+
+            uart_write_string(USART2, "Temperature ");
+            uart_write_string(USART2, temp_string);
+            uart_write_string(USART2, " C\r\n");
+            uart_write_string(USART2, "Pressure ");
+            uart_write_string(USART2, pascal_string);   /* Pa are hundredths of a hPa */
+            uart_write_string(USART2, " hPa\r\n");
+
+            /* Each unit starts where its number ends, so a longer value such as
+               -10.25 never runs into it. The unit's leading space is the gap. */
+            ssd1306_draw_string(screen, temp_string, 0, 0);
+            ssd1306_draw_string(screen, " C", (t_len * 6), 0);
+            ssd1306_draw_string(screen, pascal_string, 0, 1);
+            ssd1306_draw_string(screen, " hPa", (p_len * 6), 1);
+        }
+    }
 
     st = ssd1306_send_buffer(I2C1, screen);
     uart_write_string(USART2, "SSD1306 screen test");

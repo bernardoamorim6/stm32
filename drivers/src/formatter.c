@@ -3,9 +3,9 @@
 /* Digits before the point only: INT32_MIN gives 21474836, eight of them */
 #define RAW_MEASUREMENT_SIZE 8
 
-void measurement_formatter(int32_t value, char *s){
+uint8_t measurement_formatter(int32_t value, char *s){
     char digits[RAW_MEASUREMENT_SIZE];
-    int cur = 0;
+    uint8_t cur = 0;
     if (value < 0) {
         s[cur] = '-';
         cur++;
@@ -36,4 +36,6 @@ void measurement_formatter(int32_t value, char *s){
     s[cur] = (char)('0' + (frac % 10));
     cur++;
     s[cur] = '\0';
+
+    return cur;
 }

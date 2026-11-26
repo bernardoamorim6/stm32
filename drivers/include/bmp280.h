@@ -34,6 +34,10 @@ i2c_state_t bmp280_read_calib(I2C_Regs *i2c, bmp280_calib_t *cal);
 i2c_state_t bmp280_start_forced(I2C_Regs *i2c);           /* one measurement, then back to sleep */
 i2c_state_t bmp280_read_raw(I2C_Regs *i2c, int32_t *adc_T, int32_t *adc_P);
 
+/* One forced measurement, compensated: temp in 0.01 degC, pascal in Pa. The
+   calibration is read once by the caller; the outputs are only written on DONE. */
+i2c_state_t bmp280_measurement(I2C_Regs *i2c, const bmp280_calib_t *cal, int32_t *temp, uint32_t *pascal);
+
 /* Maths side: no hardware, so all of it is tested on the host. */
 void bmp280_parse_calib(const uint8_t bytes[24], bmp280_calib_t *cal);
 

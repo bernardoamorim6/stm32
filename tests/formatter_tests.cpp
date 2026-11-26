@@ -99,3 +99,18 @@ TEST(MeasurementFormatter, OnlyHundredthsKeepsBothZeros) {
     EXPECT_EQ(s[4], '5');
     EXPECT_EQ(s[5], '\0');
 }
+
+/* main places the unit with this length, so a wrong one shows as a misplaced unit */
+TEST(MeasurementFormatter, ReturnsLengthWithoutTerminator) {
+    char s[FORMATTED_MEASUREMENT_SIZE];
+    fill_array(s);
+    int32_t value = 2543;
+    uint8_t len = measurement_formatter(value, s);
+    EXPECT_EQ(s[0], '2');
+    EXPECT_EQ(s[1], '5');
+    EXPECT_EQ(s[2], '.');
+    EXPECT_EQ(s[3], '4');
+    EXPECT_EQ(s[4], '3');
+    EXPECT_EQ(s[5], '\0');
+    EXPECT_EQ(len, 5);
+}

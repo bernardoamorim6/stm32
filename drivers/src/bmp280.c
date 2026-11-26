@@ -1,4 +1,5 @@
 #include "../include/bmp280.h"
+#include "../include/systick.h"
 #include <stdint.h>
 
 #define BMP280_ADDR       0x76U
@@ -90,5 +91,29 @@ i2c_state_t bmp280_read_raw(I2C_Regs *i2c, int32_t *adc_T, int32_t *adc_P){
         *adc_P = (int32_t)(((uint32_t)data[0] << 12) | ((uint32_t)data[1] << 4) | ((uint32_t)data[2] >> 4));
         *adc_T = (int32_t)(((uint32_t)data[3] << 12) | ((uint32_t)data[4] << 4) | ((uint32_t)data[5] >> 4));
     }
+    return st;
+}
+
+/* No calibration read here: it is fixed at the factory, so the caller reads it
+   once at boot instead of 24 bytes on every measurement */
+i2c_state_t bmp280_measurement(I2C_Regs *i2c, const bmp280_calib_t *cal, int32_t *temp, uint32_t *pascal){
+
+    int32_t adc_T = 0;
+    int32_t adc_P = 0;
+    int32_t t_fine = 0;
+
+    i2c_state_t st = bmp280_start_forced(i2c);
+    if (st != I2C_DONE) {
+        return st;
+    }
+    delay_ms(10);   /* x1 oversampling takes 6.4 ms at most (datasheet Table 13) */
+    st = bmp280_read_raw(i2c, &adc_T, &adc_P);
+    if (st != I2C_DONE) {
+        return st;
+    }
+
+    *temp = bmp280_compensate_T(cal, adc_T, &t_fine);
+    *pascal = bmp280_compensate_P(cal, adc_P, t_fine);
+
     return st;
 }

@@ -38,6 +38,7 @@ if(CMAKE_CROSSCOMPILING)
     drivers/src/bmp280.c
     drivers/src/ssd1306.c
     drivers/src/mem.c
+    drivers/src/formatter.c
   )
   set_target_properties(firmware PROPERTIES SUFFIX ".elf")
 
