@@ -250,12 +250,14 @@ int main(void) {
     print_state(st);
     uart_write_string(USART2, "\r\n");
 
+    /* static puts the 1 KB in .bss, not on the stack, and it outlives every frame */
     static uint8_t screen[SSD1306_BUF_SIZE];
     ssd1306_clear(screen);
 
-    for (int i = 0; i < SSD1306_BUF_SIZE / 8; i++) {
-        screen[i] = 0xFF;
-    }
+    ssd1306_draw_char(screen, '3', 0, 1);
+    ssd1306_draw_char(screen, '.', 6, 1);
+    ssd1306_draw_char(screen, '-', 12, 1);
+    ssd1306_draw_char(screen, 'X', 18, 1);
 
     st = ssd1306_send_buffer(I2C1, screen);
     uart_write_string(USART2, "SSD1306 screen test");
