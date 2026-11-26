@@ -161,40 +161,13 @@ static void button_drives_led(void) {
     gpio_write(GPIOA, 5, gpio_read(GPIOC, 13) == 0);
 }
 
-int main(void) {
-    clock_init();
-    pins_init();
-
-    uint32_t volatile *NVIC_ISER = (uint32_t volatile *)0xE000E100;
-    *NVIC_ISER = make_mask(28, 1); /* USART2 is IRQ 28 */
-
-    systick_init(12000);
-    uart_init(USART2, 12000000, 115200);
-    i2c_init(I2C1);
-
-    i2c_bus_scan();
-    print_chip_id("bmp280", 0x76, 0xD0);    /* expect 0x60 for a BME280, 0x58 for a BMP280 */
-    print_chip_id("mpu6050", 0x68, 0x75);   /* expect 0x68 */
-    i2c_state_t st = ssd1306_startup(I2C1);
-    uart_write_string(USART2, "SSD1306 startup");
-    print_state(st);
-    uart_write_string(USART2, "\r\n");
-    /* static puts the 1 KB in .bss, not on the stack, and it outlives every frame */
-    static uint8_t screen[SSD1306_BUF_SIZE];
+/* Screen goes blank if a reading fails */
+static void update_readings(uint8_t *screen, const bmp280_calib_t *cal, i2c_state_t st){
     ssd1306_clear(screen);
-
-    /* Calibration once at boot. Without it any reading is nonsense, so a failure
-       is reported and the screen stays blank, but the board keeps running. */
-    bmp280_calib_t cal = {0};
-    st = bmp280_read_calib(I2C1, &cal);
-    if (st != I2C_DONE) {
-        uart_write_string(USART2, "Error taking calibration values ");
-        print_state(st);
-        uart_write_string(USART2, "\r\n");
-    } else {
+    if (st == I2C_DONE){
         uint32_t pascal = 0;
         int32_t temp = 0;
-        st = bmp280_measurement(I2C1, &cal, &temp, &pascal);
+        st = bmp280_measurement(I2C1, cal, &temp, &pascal);
         if(st != I2C_DONE){
             uart_write_string(USART2, "Error taking measurements ");
             print_state(st);
@@ -221,17 +194,58 @@ int main(void) {
             ssd1306_draw_string(screen, pascal_string, 0, 1);
             ssd1306_draw_string(screen, " hPa", (p_len * 6), 1);
         }
+        st = ssd1306_send_buffer(I2C1, screen);
+        if (st != I2C_DONE) {
+            uart_write_string(USART2, "Error sending buffer to screen ");
+            print_state(st);
+            uart_write_string(USART2, "\r\n");
+        }
     }
+}
 
-    st = ssd1306_send_buffer(I2C1, screen);
-    uart_write_string(USART2, "SSD1306 screen test");
+int main(void) {
+    clock_init();
+    pins_init();
+
+    uint32_t volatile *NVIC_ISER = (uint32_t volatile *)0xE000E100;
+    *NVIC_ISER = make_mask(28, 1); /* USART2 is IRQ 28 */
+
+    systick_init(12000);
+    uart_init(USART2, 12000000, 115200);
+    i2c_init(I2C1);
+
+    i2c_bus_scan();
+    print_chip_id("bmp280", 0x76, 0xD0);    /* expect 0x60 for a BME280, 0x58 for a BMP280 */
+    print_chip_id("mpu6050", 0x68, 0x75);   /* expect 0x68 */
+    i2c_state_t st = ssd1306_startup(I2C1);
+    uart_write_string(USART2, "SSD1306 startup");
     print_state(st);
     uart_write_string(USART2, "\r\n");
+    /* static puts the 1 KB in .bss, not on the stack, and it outlives every frame */
+    static uint8_t screen[SSD1306_BUF_SIZE];
 
+    /* Calibration once at boot. Without it any reading is nonsense, so a failure
+       is reported and the screen stays blank, but the board keeps running. */
+    bmp280_calib_t cal = {0};
+    i2c_state_t cal_state = bmp280_read_calib(I2C1, &cal);
+    if (st != I2C_DONE) {
+        uart_write_string(USART2, "Error taking calibration values ");
+        print_state(cal_state);
+        uart_write_string(USART2, "\r\n");
+    }
+
+    uint32_t now;
+    uint32_t last = 0;
     uart_write_string(USART2, "echo ready\r\n");
     while (1) {
         echo_one_byte();
         button_drives_led();
+        now = systick_now();
+        if (now - last >= 1000) {
+            update_readings(screen, &cal, cal_state);
+            last = now;
+        }
+
     }
     return 0;
 }
