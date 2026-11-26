@@ -22,8 +22,12 @@ i2c_state_t ssd1306_send_buffer(I2C_Regs *i2c, const uint8_t *buf);
 void ssd1306_clear(uint8_t *buf);
 
 /* Draws c with its left column at (col, page). Columns past 127 are clipped,
-   page > 7 draws nothing, and a character not in the font draws as '?'. */
+    page > 7 draws nothing, and a character not in the font draws as '?'. */
 void ssd1306_draw_char(uint8_t *buf, char c, uint8_t col, uint8_t page);
+
+/* Draws s left to right from (col, page), 6 columns per character. Stops at the
+   end of the string or the right edge; the last character that fits is clipped. */
+void ssd1306_draw_string(uint8_t *buf, const char *s, uint8_t col, uint8_t page);
 
 #ifdef __cplusplus
 }

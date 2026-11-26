@@ -254,10 +254,8 @@ int main(void) {
     static uint8_t screen[SSD1306_BUF_SIZE];
     ssd1306_clear(screen);
 
-    ssd1306_draw_char(screen, '3', 0, 1);
-    ssd1306_draw_char(screen, '.', 6, 1);
-    ssd1306_draw_char(screen, '-', 12, 1);
-    ssd1306_draw_char(screen, 'X', 18, 1);
+    ssd1306_draw_string(screen, "1021.37 hPa", 0, 1);
+    ssd1306_draw_string(screen, "----------------------", 0, 3);
 
     st = ssd1306_send_buffer(I2C1, screen);
     uart_write_string(USART2, "SSD1306 screen test");

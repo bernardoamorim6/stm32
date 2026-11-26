@@ -1,7 +1,6 @@
 #include "ssd1306.h"
 #include "i2c.h"
 #include "stm32c031_regs.h"
-#include <sys/types.h>
 
 /* 5x8 glyphs plus a blank column for spacing. One byte per column, bit 0 at
    the top, which is the layout GDDRAM uses, so drawing is a plain copy. */
@@ -29,7 +28,7 @@ static const uint8_t font[18][6] = {
 /* The whole sequence goes out as one command transfer. RAM is random at power-on,
    so the caller sends a cleared buffer before showing anything. */
 i2c_state_t ssd1306_startup(I2C_Regs *i2c){
-    static const uint8_t cmds[] = 
+    static const uint8_t cmds[] =
         {
             0xAE,               /* Display off */
             0xA8, 0x3F,         /* Set MUX Ratio */
@@ -47,7 +46,7 @@ i2c_state_t ssd1306_startup(I2C_Regs *i2c){
             0xAF,               /* Display On */
         };
 
-    return i2c_write_block(i2c, SSD1306_ADDRESS, SSD1306_CTRL_CMD, 
+    return i2c_write_block(i2c, SSD1306_ADDRESS, SSD1306_CTRL_CMD,
                         cmds, sizeof cmds);
 }
 
@@ -62,7 +61,7 @@ void ssd1306_clear(uint8_t *buf){
 i2c_state_t ssd1306_send_buffer(I2C_Regs *i2c, const uint8_t *buf){
     i2c_state_t st;
     static const uint8_t cmds[] = {0x21, 0x00, 0x7F, 0x22, 0x00, 0x07};
-    st = i2c_write_block(i2c, SSD1306_ADDRESS, SSD1306_CTRL_CMD, 
+    st = i2c_write_block(i2c, SSD1306_ADDRESS, SSD1306_CTRL_CMD,
                         cmds, sizeof cmds);
 
     /* One page per transfer: the control byte plus 128 fits in NBYTES */
@@ -76,7 +75,7 @@ i2c_state_t ssd1306_send_buffer(I2C_Regs *i2c, const uint8_t *buf){
 
 /* Only what the readings need. Anything else gets '?', so a missing glyph shows
    on the screen instead of passing for a space. */
-const uint8_t *font_char_helper(char c){
+static const uint8_t *font_char_helper(char c){
     switch (c) {
         case '0':
             return font[0];
@@ -129,6 +128,17 @@ void ssd1306_draw_char(uint8_t *buf, char c, uint8_t col, uint8_t page){
         if (col + i < 128) {
             buf[(page*128) + col + i] = glyph[i];
         }
+    }
+}
+
+/* draw_char clips anyway, but col is 8 bits: without the edge check a long
+   string wraps past 255 and overwrites the start of the line */
+void ssd1306_draw_string(uint8_t *buf, const char *s, uint8_t col, uint8_t page){
+    int i = 0;
+    while(s[i] != '\0' && col < 128){
+        ssd1306_draw_char(buf, s[i], col, page);
+        col += 6;
+        i += 1;
     }
 }
 
