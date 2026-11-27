@@ -645,15 +645,15 @@ Byte-for-byte identical output for `insert()` with constants and `Field::write<1
 
 ## I2C Registers from RM0490
 
-The registers are on page 728. 
+The registers are on page 728.
 Base Address: 0x40005400
 
-### CR2 
+### CR2
 
 - offset: 0x04
 - Reset value: 0x00000000
 - Slave address: SADD[9:0]; in 7 bit addressing mode (ADD10 = 0, default) SADD[7:1] written with the 7 bit target address to be sent. Bits SADD[9], SADD[8] and SADD[0] are don't care.
-- Direction: Bit 10, RD_WRN 
+- Direction: Bit 10, RD_WRN
     -> 0: Controller Requests write transfer
     -> 1: Controller requests read transfer
 - NBYTES[7:0] Bits [23:16]: Number of bytes to be transmitted
@@ -662,10 +662,10 @@ Base Address: 0x40005400
     -> 1: RESTART/START generation
 If the I2C is already in controller mode with AUTOEND = 0, setting this bit generates a repeated START condition when RELOAD=0, after the end of the NBYTES transfer. Otherwise, setting this bit generates a START condition once the bus is free.
 Note: Writing 0 to this bit has no effect. The START bit can be set even if the bus is BUSY or I2C is in target mode. This bit has no effect when RELOAD is set.
-- STOP - bit 14: Only pertains to controller mode. It is set by software and cleared by hardware whena stop condition is detected or when PE=0. 
+- STOP - bit 14: Only pertains to controller mode. It is set by software and cleared by hardware whena stop condition is detected or when PE=0.
     -> 0: No STOP generation
     -> 1: STOP generation after current byte transfer
-- AUTOEND - bit 25: Set and cleared by software.    
+- AUTOEND - bit 25: Set and cleared by software.
     -> 0: Software end mode; TC flag is set when NBYTES data are transferred, stretching SCL low.
     -> 1: Automatic end mode: a STOP condition is automatically sent when NBYTES data are transferred
 
@@ -675,7 +675,7 @@ Note: Writing 0 to this bit has no effect. The START bit can be set even if the 
 - offset: 0x18
 - Reset value: 0x00000001
 - Send next byte TXIS (Transmit interrupt status) - bit 1: Set by hardware when the I2C_TXDR register is empty and the data to be transmitted must be written to I2C_TXDR register. Cleared when the next data to be sent is written in the I2C_TXDR register. Bit can be wrritten to 1 by software only when NOSTRETCH=1, to generate a TXIS event (interrupt if TXIE = 1 or DMA request if TXDMAEN=1) (cleared by hardware when PE = 0)
-- Byte arrived RXNE (Receive data register not empty) - bit 2: This bit is set when the received data is copied into teh I2C_RXDR register and is ready to be read. It is cleared when the I2C_RXDR is read (cleared by hardware when PE = 0) 
+- Byte arrived RXNE (Receive data register not empty) - bit 2: This bit is set when the received data is copied into teh I2C_RXDR register and is ready to be read. It is cleared when the I2C_RXDR is read (cleared by hardware when PE = 0)
 - Transfer Complete (TC) - Bit 6: Flag set by hardware when RELOAD = 0, AUTOEND = 0 and NBYTES data have been transferred. Cleared by software when START bit or STOP bit is set. (cleared by hardware when PE = 0)
 - NACKF - Bit 4: Not acknowledge received flag, set by hardware when a NACK is received after a byte transmition. Cleared by software by writing NACKCF in ICR. (cleared by hardware when PE = 0)
 - STOPF - bit 5: Flag set by hardware when a STOP condition is detected on teh b us and the peripheral is involved in this transfer:
@@ -925,7 +925,7 @@ START_WRITE, WAIT_TXIS, WAIT_TXIS, WAIT_STOPF, DONE
 What CR2 contains for it (NBYTES, AUTOEND, RD_WRN).
 In CR2: NBYTES = 2; AUTOEND=1, RD_WRN = 0
 
-How a NACK maps to an error at each point: 
+How a NACK maps to an error at each point:
 on the address: WAIT_TXIS, first time: ERR_NACK_ADDR
 on the register byte: WAIT_TXIS, second time: ERR_NACK_DATA
 on the value byte: in WAIT_STOPF: ERR_NACK_DATA
@@ -949,7 +949,7 @@ My scan produced:
 So the address is 0x3C.
 
 2. The control byte: in the I²C interface section, the first byte after the address isn't a register number, it's a control byte. What do its Co and D/C# bits mean? Which byte value means "the following bytes are commands" and which means "the following bytes are pixel data"? Then: could your existing i2c_write_reg(addr, reg, value) already send a single command, and why?
-The control byte is sent after the address. It mainly consists of Co and D/C# followed by 6 zeros. 
+The control byte is sent after the address. It mainly consists of Co and D/C# followed by 6 zeros.
 Co D/C# 0 0 0 0 0 0
 If Co is 0, one control byte is followed by a stream of bytes of the same kind. If it is 1, every following byte gets its own control byte in front of it. If D/C# is set to 0 it defines the following bytes as commands, if it is 1 it defines them as data to be stored in GDDRAM. So Co = 0 and D/C# = 0 (0x00) means commands follow, and Co = 0 and D/C# = 1 (0x40) means pixel data follows.
 Because 0x00 makes every following byte a command, a two-byte command like 8D 14, or even the whole start-up sequence, can go in one transfer: [0x00, A8, 3F, D3, 00, ...].
@@ -961,7 +961,7 @@ Each page is divided into 8 COMs and there are 128 SEGXXX columns.
 For my model size the screen is 128*64 bits, so 1024 bytes.
 So, a bit is the pixel at the crossing of one SEG column and one COM row. When one data byte is written into the GDDRAM, it fills an 8 pixel tall column inside one page, at one segment, with the LSB on top and the MSB on the bottom.
 Assuming the origin on the top left of the page and the y axis pointing down:
-0 <= x < 128; 0 <= y < 64; 
+0 <= x < 128; 0 <= y < 64;
 pixel(x,y):
 page = y / 8;
 bit = y % 8;
@@ -991,8 +991,9 @@ Since we are using horizontal addressing mode, after each page is filled (the co
 If one page transfer fails halfway, the pointer is left in the wrong place for everything after it. So every full-screen update starts with 21 00 7F and 22 00 07, which resets the window, and a failed frame cannot misalign the next one.
 
 7. Text: the SSD1306 has no built-in font, only pixels. How will you draw 21.43 C? Which characters do you actually need, and how many bytes would a small font for just those take in flash?
-We would need digits 0-9, the minus sign, the dot, the letters " " (space), "C", "h", "P" and "a".  
+We would need digits 0-9, the minus sign, the dot, the letters " " (space), "C", "h", "P" and "a".
 We can just store each in a 5x8 grid, which matches the page height. This makes each letter and number 5 column bytes, which gives us 6 bytes per character when we account for the space between characters, which comes out to 102 bytes total. The space character is just six zero bytes; I could skip storing it and only advance the cursor, but storing it keeps the drawing code simpler.
+As built: 18 glyphs, 108 bytes, because a '?' was added for any character not in the font, so a missing glyph shows on the screen instead of passing for a space. Every glyph keeps its bottom row and its sixth column empty, so two lines on neighbouring pages never touch. I drew them on squared paper and converted each column to a byte, bit 0 at the top.
 
 8. Speed: at your measured 103.5 kHz, roughly how long does sending one full screen take, at 9 clocks per byte? Is that a problem for updating a temperature once a second?
 Since a full screen is 1024 bytes, at 103.5kHz and 9 clocks per byte, we would have 1024*9/103.5k which comes out to about 89ms, with the control and address bytes it's about 90ms. That is about 9% of a second, so it shouldn't be too bad for updating the temperature once a second.
@@ -1066,12 +1067,15 @@ Column c of a character drawn at text position (col, page) starts at col + c (co
 
 9. Once a second, without freezing. Right now main reads the BMP280 once at boot. To update every second, a delay_ms(1000) in the loop would freeze the echo and the button for a whole second. How can the loop check whether a second has passed without waiting? Hint: you already did exactly this in i2c_step with now_ms and start_ms.
 Every pass of the loop reads now = systick_now(). If now - last >= 1000, then last = now and we take the reading. The unsigned subtraction survives the counter wrapping, like in i2c_step.
-Since the measurement has a delay_ms(10) and sending two pages takes about 23 ms, the loop pauses for about 35 ms per second, which is acceptable. UART is interrupt driven, so any typed characters wait in the 64-byte ring buffer. A long paste could overflow it, but in our use case this shouldn't be a problem.
+Since the measurement has a delay_ms(10) and sending two pages takes about 24 ms, the loop pauses for about 35 ms per second, which is acceptable. Measured: 35.9 ms from the BMP280's first write to the last STOP. UART is interrupt driven, so any typed characters wait in the 64-byte ring buffer. A long paste could overflow it, but in our use case this shouldn't be a problem.
 
 10. How much to send. The two readings fit on two text lines. Which pages do they occupy, and how long does sending just those pages take at 103.5 kHz, compared with the 90 ms for the whole screen?
-I would say they can sit in the top left, at pages 1 and 3, so there is a gap between them and the numbers don't merge and become unreadable.
-Each page is one transfer: address, control byte and the 128 data bytes, which makes 130 bytes on the wire per page. This gives us 130 x 2 = 260 bytes x 9 clocks = 2340 clocks / 103.5 kHz = 22.6 ms, against 8 x 130 = 1040 bytes = 90.4 ms for the whole screen, about 4 times faster.
-Since pages 1 and 3 aren't next to each other and we are using horizontal addressing, which goes from page 1 to 2, we need to set the page range before each page is sent: 22 01 01 and then 22 03 03. Each is a 5-byte transfer which only takes about 0.4 ms (5 bytes x 9 clocks / 103.5 kHz). Sending pages 1 to 3 in one transfer isn't an option anyway: 384 data bytes is over the 254 limit from Q3.
+My first plan was pages 1 and 3, with a gap so the lines would not merge. As built they are on pages 0 and 1: the glyphs keep their bottom row empty, so neighbouring lines do not touch. The pages are named once in main.c (TEMP_PAGE, PRESSURE_PAGE) and both the draw calls and the sends use them.
+Each page is one transfer: address, control byte and the 128 data bytes, which makes 130 bytes on the wire per page. Before each page goes its own window command, 21 00 7F 22 p p, so the two lines can sit on any pages without sending the ones between. That transfer is 8 bytes on the wire (address, control byte, 6 command bytes), not the 5 I first counted.
+Prediction: 2 x (8 + 130) = 276 bytes x 9 clocks / 103.5 kHz = 24.0 ms, against about 91 ms for the whole screen.
+Measured (captures/ssd1306-two-page-refresh.sr): 24.0 ms from the START of page 0's window command to the STOP after page 1's data. Window commands 0.71 ms each, data transfers 11.27 and 11.26 ms, 20 to 27 µs of software between transfers. My first cursor reading said 36 ms because it sat on the BMP280's write at the start of the refresh, not on the window command.
+Sending pages 0 to 1 in one data transfer isn't an option anyway: 256 data bytes is over the 254 limit from Q3.
+At power-on the panel's memory is random, and pages 2 to 7 are never sent again, so the whole blank buffer is sent once at boot.
 
 # How the tests work, for studying
 

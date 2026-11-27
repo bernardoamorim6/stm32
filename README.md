@@ -4,9 +4,9 @@ Bare-metal firmware for the **NUCLEO-C031C6** (STM32C031C6, Cortex-M0+, 32 KB Fl
 
 Every register definition, the linker script, the vector table and the reset handler are written by hand from **RM0490** (STM32C0 reference manual), **PM0223** (Cortex-M0+ programming manual) and the STM32C031 datasheet.
 
-I did use ST's debugger nad flashing tools, I only wanted to use hand written instead of generated code, not refuse vendor tooling.
+I did use ST's debugger and flashing tools, I only wanted to use hand written instead of generated code, not refuse vendor tooling.
 
-**If you only read six things:**
+**If you only read seven things:**
 
 - [Trimming the internal oscillator](#trimming-it-out) from +0.5% to -0.06% error, and working out where the granularity floor is rather than stopping when it looked good enough
 - [One UART bit measured at 8.625 µs](#the-independent-measurement) against 8.667 predicted, with an honest note on why the analyser cannot resolve the difference
@@ -14,6 +14,7 @@ I did use ST's debugger nad flashing tools, I only wanted to use hand written in
 - [A test suite checked against deliberately broken code](#testing-a-driver-without-hardware), because passing tests only prove the tests run
 - [One I²C register read on the wire](#on-the-wire), decoded byte for byte against the state machine that drives it, with the clock measured over 1381 cycles
 - [A C++ register template that compiles to the same bytes as the C](#the-c17-layer-checked-at-compile-time-free-at-run-time), while rejecting out-of-range writes at compile time
+- [An OLED refresh measured at 24.0 ms against 24.0 predicted](#sending-only-what-changed), by sending the 2 pages that change instead of all 8
 
 ---
 
@@ -29,7 +30,7 @@ This is a work in progress. What follows is what actually runs and is tested, no
 
 **Startup code** (`drivers/src/startup.c`) Full 48-entry vector table transcribed from RM0490's interrupt table, placed at `0x08000000`. Unused handlers resolve to a single `DefaultHandler` through `__attribute__((weak, alias(...)))`, so a real handler defined anywhere else silently overrides the default at link time. `Reset_Handler` copies `.data` from Flash to SRAM, zeroes `.bss`, and calls `main`.
 
-**Application** (`app/main.c`) Brings up the clock, pins, SysTick, UART and I²C, runs an I²C bus scan and two chip ID reads, then loops echoing serial input back and driving the user LED from the user button. Each feature is a named function, so `main` reads as a list of what the firmware does.
+**Application** (`app/main.c`) Brings up the clock, pins, SysTick, UART and I²C, runs an I²C bus scan and two chip ID reads, starts the OLED and reads the BMP280's calibration once. The loop echoes serial input, drives the user LED from the user button, and once a second takes a BMP280 reading and shows it on both picocom and the OLED. The once-a-second check compares `systick_now()` against the last update instead of waiting, so echo and the button never pause for it. Each feature is a named function, so `main` reads as a list of what the firmware does.
 
 **SysTick and `delay_ms()`** (`drivers/src/systick.c`) Defined the four SysTick registers from PM0223 as a `volatile uint32_t` struct at `0xE000E010`. `systick_init()` writes the reload value, clears the current count, then enables the counter with its interrupt, in that order. `SysTick_Handler` increments a `static volatile` millisecond counter, and `delay_ms()` waits on the difference, using unsigned subtraction so it stays correct across a counter wrap. The handler needs no registration: defining it here overrides the weak alias in `startup.c` at link time, which `nm` confirms: `SysTick_Handler` moves off `DefaultHandler`'s address onto its own.
 
@@ -47,11 +48,15 @@ This is a work in progress. What follows is what actually runs and is tested, no
 
 **C++17 register layer** (`hal/include/reg.hpp`) A field's register, position and width are template parameters, so writing a value that does not fit, or declaring a field that runs past bit 31, fails to compile. Byte-for-byte identical machine code to the equivalent C. Covered by 10 host tests and 2 compile-time rejection tests. See [below](#the-c17-layer-checked-at-compile-time-free-at-run-time).
 
-**I²C controller** (`drivers/src/i2c.c`) Register reads and writes as two non-blocking state machines. A read writes the register number, issues a repeated START and reads `len` bytes; a write sends the register number and one value in a single transfer. `i2c_step_read` reads `ISR` once, takes at most one action and returns, checking bus errors first, then NACK, then the flag its state is waiting for, then the timeout. Time comes in as an argument instead of being read inside, so the timeout is testable on the host, including across the 32-bit tick wrap. A NACK does not end the transfer on the spot: the peripheral sends STOP by itself, so the machine waits for `STOPF` and then reports which byte was refused. `i2c_read_reg` and `i2c_write_reg` are the blocking wrappers, with a 30 ms budget against a worst case of about 23 ms for a 255-byte read at 100 kHz. `TIMINGR` is `0x30420F13` from RM0490's table for 100 kHz from a 16 MHz kernel clock, which is why I2C1 runs from HSIKER (16 MHz) rather than the 12 MHz PCLK. Covered by 38 host tests.
+**I²C controller** (`drivers/src/i2c.c`) Register reads, single writes and block writes as three non-blocking state machines. A read writes the register number, issues a repeated START and reads `len` bytes; a write sends the register number and one value in a single transfer; a block write sends one leading byte and then up to 254 more, which is what the OLED needs. `i2c_step_read` reads `ISR` once, takes at most one action and returns, checking bus errors first, then NACK, then the flag its state is waiting for, then the timeout. Time comes in as an argument instead of being read inside, so the timeout is testable on the host, including across the 32-bit tick wrap. A NACK does not end the transfer on the spot: the peripheral sends STOP by itself, so the machine waits for `STOPF` and then reports which byte was refused. `i2c_read_reg` and `i2c_write_reg` are the blocking wrappers, with a 30 ms budget against a worst case of about 23 ms for a 255-byte read at 100 kHz. `TIMINGR` is `0x30420F13` from RM0490's table for 100 kHz from a 16 MHz kernel clock, which is why I2C1 runs from HSIKER (16 MHz) rather than the 12 MHz PCLK. Covered by 53 host tests.
 
 Verified on the board: a scan of every 7-bit address finds the MPU-6050 at `0x68` and the pressure sensor at `0x76`. Reading their chip ID registers returns `0x68` for the MPU-6050 and **`0x58`** for the other, which is a BMP280, not the BME280 (`0x60`) the board was sold as. So the sensor driver targets the BMP280: the same temperature and pressure maths, no humidity. A 24-byte burst read of its factory calibration block returns values matching Bosch's datasheet example exactly in five of the twelve coefficients, which a misordered or shifted byte could not do.
 
-**BMP280 driver** (`drivers/src/bmp280.c`) Split into a bus side, which only moves bytes (chip ID, calibration, start a forced measurement, read the six data bytes), and a maths side with no hardware at all: parsing the calibration and the datasheet's 32-bit fixed point compensation (appendix 8.2), chosen because the M0+ has no FPU and turns every 64-bit multiply into a library call. The datasheet keeps an intermediate, `t_fine`, in a global that the temperature function writes and the pressure function silently reads; here it is handed back by the temperature function and passed into the pressure function, so a pressure can never be computed from a stale temperature. One real board reading, raw `0x7E8A0` and `0x50930`, compensates to **21.43 °C and 1021.37 hPa**. The maths is covered by 10 host tests, described [below](#testing-a-driver-without-hardware).
+**BMP280 driver** (`drivers/src/bmp280.c`) Split into a bus side, which only moves bytes (chip ID, calibration, start a forced measurement, read the six data bytes), and a maths side with no hardware at all: parsing the calibration and the datasheet's 32-bit fixed point compensation (appendix 8.2), chosen because the M0+ has no FPU and turns every 64-bit multiply into a library call. The datasheet keeps an intermediate, `t_fine`, in a global that the temperature function writes and the pressure function silently reads; here it is handed back by the temperature function and passed into the pressure function, so a pressure can never be computed from a stale temperature. One real board reading, raw `0x7E8A0` and `0x50930`, compensates to **21.43 °C and 1021.37 hPa**. The calibration is fixed at the factory, so it is read once at boot and every later measurement reuses it. The maths is covered by 10 host tests, described [below](#testing-a-driver-without-hardware).
+
+**SSD1306 OLED driver** (`drivers/src/ssd1306.c`) 128x64 display at `0x3C` on the same bus, showing the temperature and pressure. Drawing and sending are separate: the draw functions only write a 1024-byte buffer in RAM and are tested on the host, and the send is the only function that touches I²C. It sends any range of pages, so a refresh only sends the two that hold the readings. The 18-glyph font is drawn by hand. Covered by 10 host tests. See [below](#the-oled-two-pages-not-eight).
+
+**Number formatter** (`drivers/src/formatter.c`) Turns a value in hundredths into text with two decimals, so 2143 becomes `21.43` and -5 becomes `-0.05`. It does no I/O, so the UART and the OLED print the same string, and it returns the length so the unit can be placed right after the number. Covered by 7 host tests, including `INT32_MIN`, the longest possible output.
 
 **Clock tree** The reset clock path is documented end to end in
 [`docs/NOTES.md`](docs/NOTES.md): HSI48 (48 MHz) -> `HSIDIV` ÷4 -> HSISYS -> `SW` mux ->
@@ -63,9 +68,8 @@ The scope below is the plan, not a promise, it gets revised as I go, and this se
 
 **C layer (C17), remaining:**
 
-- A `printf`-style formatter over the UART. Output is currently raw bytes and strings only.
+- A general `printf`-style formatter over the UART. Output is strings, plus the fixed-point formatter above for readings.
 - Bus recovery for a target holding SDA low
-- SSD1306 OLED on the same I²C bus, showing the temperature and pressure
 
 **Host tests for the UART driver.** `uart_init` takes a pointer and a clock frequency, so it has the same testable shape as the GPIO driver, but no suite exists for it yet. The obvious cases are the `BRR` divisor for a few clock and baud combinations, and that `TE` and `UE` end up set without disturbing the framing fields.
 
@@ -348,6 +352,46 @@ The BMP280's 24 calibration bytes come back in one transfer: one register number
 
 Every byte is ACKed by the controller except the last, which gets the NACK that tells the target to stop sending, then the STOP. Between the data bytes there is no stretching at all, unlike after the address: `RXDR` is double buffered against the shift register, so the peripheral can receive the next byte while `i2c_step_read` collects the last one, and the software is well inside the 87 µs that gives it. The 24 bytes plus the three header bytes take 27 × 9 clocks × 9.66 µs = 2347 µs, and the measured 2371 µs leaves about 24 µs for START, repeated START and STOP.
 
+## The OLED: two pages, not eight
+
+![OLED showing temperature and pressure](images/ssd1306-temp-press.jpg)
+
+The SSD1306 sits on the same I²C bus as the sensors and shows the BMP280 reading, refreshed once a second. The squared paper behind the board is where the font was drawn, one 5x8 grid per character.
+
+### Drawing is RAM, sending is I²C
+
+The display holds 8 pages of 128 columns, and each byte is one column of 8 pixels with bit 0 at the top. The firmware keeps a copy of all of it, a 1024-byte buffer that `main` declares `static` so it sits in `.bss` rather than on the stack. Drawing a character copies its 6 column bytes into that buffer and nothing else; the font is stored in exactly the layout the display uses, so drawing needs no bit shuffling. Only `ssd1306_send_buffer` talks to the bus.
+
+That split is what makes the drawing testable on the host: a test draws into an ordinary array and checks bytes. The edge cases are where the bugs would be. A character at column 125 must write 3 columns and stop, because column 128 is really column 0 of the next page, and on page 7 it is past the end of the buffer. A page past 7 must write nothing, which a test can only see by drawing into a buffer with 6 spare bytes after it. A string must stop at the right edge too: the column is 8 bits, so without that check the 44th character of a long string wraps round to column 2 and overwrites the start of the line.
+
+### A block write
+
+Everything sent to the SSD1306 has the same shape: address, one control byte (`0x00` means commands follow, `0x40` means pixel data), then the bytes. The single-register write could only carry one value, so the I²C driver got a third state machine with the same contract: the control byte goes where the register number would, then up to 254 bytes. 254, because `NBYTES` counts the control byte too and is 8 bits wide. A length of 255 would not fail loudly: the extra bit lands on `RELOAD`, the next field up, and starts a different kind of transfer. So any length outside 1 to 254 ends in `I2C_ERR_LEN` before a register is written.
+
+### Sending only what changed
+
+A full screen is 8 transfers of 130 bytes (address, control byte, 128 pixels) plus the command that sets the window, about 91 ms at 103.5 kHz. The readings only use pages 0 and 1, so a refresh sends those two pages, each preceded by its own window command (`21 00 7F 22 p p`), so the two lines can sit on any pages without the ones between being sent. The prediction for the two pages is 2 x (8 + 130) bytes x 9 clocks / 103.5 kHz = **24.0 ms**.
+
+One refresh, captured at 4 MHz ([`captures/ssd1306-two-page-refresh.sr`](captures/ssd1306-two-page-refresh.sr)): the BMP280 measurement, a 10 ms wait, its 6-byte read, then the two pages:
+
+![One refresh on the wire](images/i2c-screen-refresh.png)
+
+| | Measured | Predicted |
+|---|---|---|
+| Page 0 window command, 8 bytes | 0.71 ms | 0.70 ms |
+| Page 0 data, 130 bytes | 11.27 ms | 11.30 ms |
+| Page 1 window command, 8 bytes | 0.71 ms | 0.70 ms |
+| Page 1 data, 130 bytes | 11.26 ms | 11.30 ms |
+| **Page 0 window START to page 1 STOP** | **24.0 ms** | **24.0 ms** |
+
+The gaps between transfers are 20 to 27 µs, the time the CPU takes to start the next one. My first cursor reading said 36 ms, because the cursor sat on the BMP280's write rather than on the first window command: 36 ms is the whole refresh, of which 10 ms is the wait for the measurement. The window command for page 1, where `22 01 01` limits the display to that one page:
+
+![The page 1 window command](images/i2c-window-command.png)
+
+Two details make this hold together. The pages each reading is drawn on are named once in `main.c`, and both the draw calls and the sends use those names, so moving a line is one edit and the send follows. And since the panel's memory is random at power-on and the bottom six pages are never sent again, the whole blank buffer goes out once at boot.
+
+The refresh still blocks for about 36 ms a second. Nothing is lost, because the UART receives into its ring buffer from an interrupt, and the button is read again as soon as the refresh returns.
+
 ## The C++17 layer: checked at compile time, free at run time
 
 `hal/include/reg.hpp` describes a register field as a type:
@@ -400,6 +444,7 @@ C++ sources in the firmware build with `-fno-exceptions -fno-rtti -fno-threadsaf
 | Host tests | GoogleTest, fetched by CMake at configure time |
 | Flash / debug | STM32CubeCLT: `STM32_Programmer_CLI`, `ST-LINK_gdbserver` |
 | Sensors | BMP280 (sold as a BME280) at `0x76`, MPU-6050 at `0x68`, on I2C1 (PB8 SCL, PB9 SDA) |
+| Display | SSD1306 128x64 OLED at `0x3C`, on the same bus |
 
 The toolchain version is pinned to `15.3.Rel1` in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) so CI builds with the same compiler as the development machine.
 
@@ -407,7 +452,7 @@ Current firmware size:
 
 ```
    text    data     bss     dec     hex
-   4200       0     148    4348    10fc
+   5728       0    1172    6900    1af4
 ```
 
 ---
@@ -454,16 +499,16 @@ What this should show, and why it matters:
 
 ```
 0 .isr_vector   000000c0  08000000  08000000
-1 .text         000008a8  080000c0  080000c0
-2 .data         00000000  20000000  08000968
-3 .bss          00000094  20000000  08000968
+1 .text         000015a0  080000c0  080000c0
+2 .data         00000000  20000000  08001660
+3 .bss          00000494  20000000  08001660
 ```
 
 `.isr_vector` sits at `0x08000000`: the vector table has to be the first thing in Flash or the core can't find the initial stack pointer and reset vector on boot.
 
-`.bss` is now 148 bytes: two 72-byte ring buffers and the SysTick counter.
+`.bss` is now 1172 bytes: the 1024-byte OLED buffer, two 72-byte ring buffers and the SysTick counter. That is about 10% of the 12 KB of SRAM.
 
-`.data` and `.bss` share a VMA of `0x20000000` but `.data`'s LMA is in Flash, because initialized globals are stored in the image and copied to SRAM at startup, which is exactly what the copy loop in `Reset_Handler` does. `.data` is currently empty and `.bss` holds only the SysTick tick counter, since the firmware has no initialized globals at the moment. Adding `uint32_t x = 0xDEADBEEF;` to `main.c` makes `.data` grow by four bytes and its LMA and VMA visibly diverge, which is the quickest way to watch the copy loop do something in the debugger.
+`.data` and `.bss` share a VMA of `0x20000000` but `.data`'s LMA is in Flash, because initialized globals are stored in the image and copied to SRAM at startup, which is exactly what the copy loop in `Reset_Handler` does. `.data` is currently empty, since the firmware has no initialized globals at the moment; everything in `.bss` starts at zero. Adding `uint32_t x = 0xDEADBEEF;` to `main.c` makes `.data` grow by four bytes and its LMA and VMA visibly diverge, which is the quickest way to watch the copy loop do something in the debugger.
 
 ---
 
@@ -471,8 +516,8 @@ What this should show, and why it matters:
 
 ```
 app/                 application entry point
-drivers/include/     C headers (bitops.h, stm32c031_regs.h, gpio.h, systick.h, usart.h, i2c.h, bmp280.h, ringbuffer.h, critical.h)
-drivers/src/         C sources (startup.c, systick.c, gpio.c, usart.c, i2c.c, bmp280.c, ringbuffer.c, mem.c)
+drivers/include/     C headers (bitops.h, stm32c031_regs.h, gpio.h, systick.h, usart.h, i2c.h, bmp280.h, ssd1306.h, formatter.h, ringbuffer.h, critical.h)
+drivers/src/         C sources (startup.c, systick.c, gpio.c, usart.c, i2c.c, bmp280.c, ssd1306.c, formatter.c, ringbuffer.c, mem.c)
 hal/include/         C++17 register layer (reg.hpp)
 bench/               reproducible size comparisons (bench/gpio_mode/run.sh)
 tests/               GoogleTest suites, host-only
@@ -490,7 +535,7 @@ docs/                NOTES.md, the working log (reference PDFs are gitignored)
 
 ## Testing a driver without hardware
 
-116 GoogleTest cases and 2 compile-time rejection tests run on the host, with no board attached. That is possible because no driver function knows its own address:
+148 GoogleTest cases and 2 compile-time rejection tests run on the host, with no board attached. That is possible because no driver function knows its own address:
 
 ```c
 void gpio_set_mode(GPIO_Regs *port, uint32_t pin, gpio_mode_t mode);
@@ -529,6 +574,12 @@ The compensation has no hardware in it, so its tests are plain numbers in and nu
 
 The suite was checked against four broken copies of the driver. Doing the temperature in unsigned arithmetic, an easy slip since the raw readings are never negative, fails exactly one test: the below-zero one, the only input where an intermediate goes negative.
 
+### The OLED and the formatter: testing what did not happen
+
+Most of these tests check that something was **not** written. The drawing tests start from a zeroed buffer and check every byte outside the character as well as the character itself, and the formatter tests start from a buffer full of `1`s, so a missing `'\0'` cannot hide behind a leftover zero. That fill had a bug of its own at first: the helper used `sizeof` on its pointer parameter, which is 8 on the host, so it filled 8 of 13 bytes and the `INT32_MIN` test could not see a missing terminator. Deleting the terminator line on purpose is what showed it.
+
+A refused page range must return `I2C_ERR_LEN` and leave a fake `I2C_Regs` untouched, which proves the check runs before the first transfer. With the check removed, the test does not fail so much as hang: the send starts a real transfer on the fake, waits for a flag a struct in RAM never raises, and the timeout never fires because nothing advances the tick counter on the host. `ctest --timeout` turns that hang into a failure.
+
 ## CI
 
 Three jobs on every push and pull request ([`ci.yml`](.github/workflows/ci.yml)):
@@ -550,6 +601,7 @@ Both builds use `-Wall -Wextra`. `-Werror` is a CMake option, `WARNINGS_AS_ERROR
 - **The SVD disagrees with the reference manual.** ST's own `STM32C031.svd` gives `RCC_CR` a reset value of `0x00000500`, putting `HSIDIV` at ÷1 and implying a 48 MHz boot clock. RM0490 says ÷4, and its revision history records the correction. I read the register off the chip and got `0x00001540`. The manual is right, the SVD is wrong on two fields, and the silicon settles it.
 - **A vector table entry is one greater than the function it points to.** `Reset_Handler` is at `0x08000218`; the table holds `0x08000219`. That's the Thumb bit, and a cleared bit 0 means an immediate HardFault.
 - **A state machine that returned a state without storing it.** Every host test passed, and the first I²C read on the board hung. The tests now check the stored state after every step; details under [testing](#testing-a-driver-without-hardware).
+- **A 256-byte buffer that was 0 bytes long.** The size of a two-page buffer was computed into a `uint8_t`: 2 x 128 = 256, which wraps to 0. Every draw then wrote past an empty array into the rest of the stack, and the readings simply stopped updating, with no crash to point at the cause. The fix was not a wider type but no second buffer at all: the screen buffer already holds every page, and only the range sent changes.
 - **A blinking LED hid a wrong register read.** My first read-modify-write on `ODR` read `MODER` instead. The LED blinked correctly anyway, because bit 5 was still being set and cleared as intended, so the symptom I was watching for was present while the code was wrong.
 
 `docs/NOTES.md` also holds the full clock-path derivation and a written answer to "what happens between reset and `main()`".
