@@ -1,9 +1,12 @@
 #include <cstdint>
 #include <gtest/gtest.h>
 #include "../drivers/include/ssd1306.h"
+#include "../drivers/include/stm32c031_regs.h"
+#include "i2c.h"
 
-/* Buffer side only: a plain array, no fake registers. Expected glyph bytes are
-   written out by hand rather than read from the font table. */
+/* Buffer side: a plain array. Expected glyph bytes are written out by hand
+   rather than read from the font table. The send tests only cover ranges that
+   are refused before any bus traffic, so their fake registers must stay zero. */
 
 /* Starts from non-zero, or a clear that does nothing would pass */
 TEST(Ssd1306Clear, SetsAllBytesToZero) {
@@ -120,3 +123,24 @@ TEST(Ssd1306DrawString, EmptyStringDrawsNothing) {
     }
 }
 
+TEST(Ssd1306SendBuffer, StartAfterEndDoesntSend) {
+    I2C_Regs fake{};
+    uint8_t start = 4;
+    uint8_t end = 2;
+    uint8_t buf[SSD1306_BUF_SIZE] = {};
+    i2c_state_t st = ssd1306_send_buffer(&fake, buf, start, end);
+    EXPECT_EQ(st, I2C_ERR_LEN);
+    EXPECT_EQ(fake.CR2, 0U) << "a transfer was started";
+    EXPECT_EQ(fake.TXDR, 0U) << "a byte was sent";
+}
+
+TEST(Ssd1306SendBuffer, EndAfterSevenDoesntSend) {
+    I2C_Regs fake{};
+    uint8_t start = 4;
+    uint8_t end = 8;
+    uint8_t buf[SSD1306_BUF_SIZE] = {};
+    i2c_state_t st = ssd1306_send_buffer(&fake, buf, start, end);
+    EXPECT_EQ(st, I2C_ERR_LEN);
+    EXPECT_EQ(fake.CR2, 0U) << "a transfer was started";
+    EXPECT_EQ(fake.TXDR, 0U) << "a byte was sent";
+}

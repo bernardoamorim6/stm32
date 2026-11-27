@@ -56,17 +56,23 @@ void ssd1306_clear(uint8_t *buf){
     }
 }
 
-/* Resets the column and page window first, so a frame that failed halfway cannot
-   misalign the next one. Stops at the first transfer that does not end in DONE. */
-i2c_state_t ssd1306_send_buffer(I2C_Regs *i2c, const uint8_t *buf){
+/* The range is checked before any bus traffic, so a bad one never reads past buf.
+   The window is set to exactly the range first, so the data lands on those pages
+   and a frame that failed halfway cannot misalign the next one. Stops at the
+   first transfer that does not end in DONE. */
+i2c_state_t ssd1306_send_buffer(I2C_Regs *i2c, const uint8_t *buf, uint8_t start_page,
+                                uint8_t end_page){
+    if (start_page > end_page || end_page > 7) {
+        return I2C_ERR_LEN;
+    }
     i2c_state_t st;
-    static const uint8_t cmds[] = {0x21, 0x00, 0x7F, 0x22, 0x00, 0x07};
+    const uint8_t cmds[] = {0x21, 0x00, 0x7F, 0x22, start_page, end_page};
     st = i2c_write_block(i2c, SSD1306_ADDRESS, SSD1306_CTRL_CMD,
                         cmds, sizeof cmds);
 
     /* One page per transfer: the control byte plus 128 fits in NBYTES */
-    uint8_t page = 0;
-    while (st == I2C_DONE && page < 8) {
+    uint8_t page = start_page;
+    while (st == I2C_DONE && page <= end_page) {
         st = i2c_write_block(i2c, SSD1306_ADDRESS, SSD1306_CTRL_DATA, (buf + (page*128)), 128);
         page++;
     }

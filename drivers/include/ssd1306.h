@@ -16,7 +16,10 @@ extern "C" {
 
 /* Bus side. Each returns the state its I2C transfer ended in. */
 i2c_state_t ssd1306_startup(I2C_Regs *i2c);
-i2c_state_t ssd1306_send_buffer(I2C_Regs *i2c, const uint8_t *buf);
+/* Sends pages start_page..end_page of buf and leaves the rest of the panel as
+   it is. A start after the end, or a page past 7, sends nothing: I2C_ERR_LEN. */
+i2c_state_t ssd1306_send_buffer(I2C_Regs *i2c, const uint8_t *buf, uint8_t start_page,
+                                uint8_t end_page);
 
 /* Buffer side: RAM only, no bus, so all of it is tested on the host. */
 void ssd1306_clear(uint8_t *buf);

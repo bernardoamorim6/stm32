@@ -161,8 +161,24 @@ static void button_drives_led(void) {
     gpio_write(GPIOA, 5, gpio_read(GPIOC, 13) == 0);
 }
 
+/* The only place that knows where the readings go: the draw calls and the sends
+   both use these, so moving a line is one edit. */
+#define TEMP_PAGE      0
+#define PRESSURE_PAGE  1
+
+/* Sends one page and reports a failure by name */
+static void send_page(const uint8_t *screen, uint8_t page) {
+    i2c_state_t send_state = ssd1306_send_buffer(I2C1, screen, page, page);
+    if (send_state != I2C_DONE) {
+        uart_write_string(USART2, "Error sending page to screen ");
+        print_state(send_state);
+        uart_write_string(USART2, "\r\n");
+    }
+}
+
 /* Screen goes blank if a reading fails: an old value left up would look current.
-   The blank frame is still sent, so the panel never shows stale or random pixels. */
+   The blank frame is still sent, so the panel never shows stale pixels. Only the
+   two reading pages go out, about 23 ms instead of 90 ms for the whole screen. */
 static void update_readings(uint8_t *screen, const bmp280_calib_t *cal, i2c_state_t cal_state){
     ssd1306_clear(screen);
     if (cal_state == I2C_DONE){
@@ -190,18 +206,15 @@ static void update_readings(uint8_t *screen, const bmp280_calib_t *cal, i2c_stat
 
             /* Each unit starts where its number ends, so a longer value such as
                -10.25 never runs into it. The unit's leading space is the gap. */
-            ssd1306_draw_string(screen, temp_string, 0, 0);
-            ssd1306_draw_string(screen, " C", (t_len * 6), 0);
-            ssd1306_draw_string(screen, pascal_string, 0, 1);
-            ssd1306_draw_string(screen, " hPa", (p_len * 6), 1);
+            ssd1306_draw_string(screen, temp_string, 0, TEMP_PAGE);
+            ssd1306_draw_string(screen, " C", (t_len * 6), TEMP_PAGE);
+            ssd1306_draw_string(screen, pascal_string, 0, PRESSURE_PAGE);
+            ssd1306_draw_string(screen, " hPa", (p_len * 6), PRESSURE_PAGE);
         }
     }
-    i2c_state_t send_state = ssd1306_send_buffer(I2C1, screen);
-    if (send_state != I2C_DONE) {
-        uart_write_string(USART2, "Error sending buffer to screen ");
-        print_state(send_state);
-        uart_write_string(USART2, "\r\n");
-    }
+    /* One send per line, so the two can sit on any pages, next to each other or not */
+    send_page(screen, TEMP_PAGE);
+    send_page(screen, PRESSURE_PAGE);
 }
 
 int main(void) {
@@ -237,6 +250,15 @@ int main(void) {
 
     uint32_t now;
     uint32_t last = 0;
+    /* The panel's RAM is random at power-on and only the reading pages are sent
+       from now on, so the whole (still zeroed) buffer goes out once here */
+    oled_state = ssd1306_send_buffer(I2C1, screen, 0, 7);
+    if (oled_state != I2C_DONE) {
+        uart_write_string(USART2, "Error clearing the screen ");
+        print_state(oled_state);
+        uart_write_string(USART2, "\r\n");
+    }
+
     uart_write_string(USART2, "echo ready\r\n");
     while (1) {
         echo_one_byte();
